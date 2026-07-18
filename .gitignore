@@ -1,0 +1,28 @@
+# Python byte-code and tool caches
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# Virtual environments
+.venv/
+venv/
+env/
+
+# Packaging artifacts
+build/
+dist/
+*.egg-info/
+
+# Test coverage
+.coverage
+htmlcov/
+
+# IDE settings
+.idea/
+.vscode/
+
+# Windows / OneDrive noise
+Thumbs.db
+desktop.ini
