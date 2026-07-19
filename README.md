@@ -85,8 +85,6 @@ What makes it different:
 
 ## 🏗️ Architecture
 
-<!-- TODO: optionally replace with a rendered architecture image -->
-
 ```mermaid
 flowchart LR
     CLI[cli.py<br/>argparse, output, exit codes] --> SC[scanner.py<br/>file walk + encoding-safe parse]
