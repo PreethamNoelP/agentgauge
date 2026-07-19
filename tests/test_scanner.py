@@ -1,3 +1,5 @@
+import agentgauge.scanner as scanner_module
+from agentgauge.astutils import FileContext
 from agentgauge.scanner import scan
 
 
@@ -30,11 +32,22 @@ def test_syntax_error_is_reported_not_fatal(tmp_path):
     assert "bad.py" in report.skipped[0]
 
 
-def test_too_deeply_nested_file_is_skipped_not_fatal(tmp_path):
-    # 5000 chained unary operators blow the parser's recursion guard with a
-    # RecursionError (unlike parentheses, which raise plain SyntaxError).
-    (tmp_path / "deep.py").write_text("x = " + "not " * 5000 + "True\n")
+def test_recursion_error_is_skipped_not_fatal(tmp_path, monkeypatch):
+    # The nesting depth at which ast.parse overflows varies by platform and
+    # Python version (Linux 3.13 parses chains that crash Windows 3.11), so
+    # simulate the RecursionError instead of trying to provoke a real one --
+    # the contract under test is the scanner's handling, not CPython's stack.
+    (tmp_path / "deep.py").write_text("x = 1\n")
     (tmp_path / "good.py").write_text("auto_approve = True\n")
+
+    class ExplodingFileContext:
+        @staticmethod
+        def from_source(source, path="<memory>"):
+            if path == "deep.py":
+                raise RecursionError
+            return FileContext.from_source(source, path=path)
+
+    monkeypatch.setattr(scanner_module, "FileContext", ExplodingFileContext)
 
     report = scan(tmp_path)
 
