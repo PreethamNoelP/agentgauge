@@ -30,6 +30,20 @@ def test_syntax_error_is_reported_not_fatal(tmp_path):
     assert "bad.py" in report.skipped[0]
 
 
+def test_too_deeply_nested_file_is_skipped_not_fatal(tmp_path):
+    # 5000 chained unary operators blow the parser's recursion guard with a
+    # RecursionError (unlike parentheses, which raise plain SyntaxError).
+    (tmp_path / "deep.py").write_text("x = " + "not " * 5000 + "True\n")
+    (tmp_path / "good.py").write_text("auto_approve = True\n")
+
+    report = scan(tmp_path)
+
+    assert report.files_scanned == 1
+    assert len(report.skipped) == 1
+    assert "deep.py" in report.skipped[0]
+    assert any(f.rule == "permissive-defaults" for f in report.findings)
+
+
 def test_scan_accepts_a_single_file(tmp_path):
     target = tmp_path / "one.py"
     target.write_text("auto_approve = True\n")
