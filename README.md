@@ -140,34 +140,39 @@ Exit codes (the CI contract):
 **Prerequisites:** Python 3.11+ — nothing else.
 
 ```console
-$ git clone https://github.com/PreethamNoelP/agentgauge.git
-$ cd agentgauge
-$ python -m agentgauge --help
+$ pip install git+https://github.com/PreethamNoelP/agentgauge.git
+$ agentgauge --help
 ```
 
-That's the whole install — zero dependencies means there is no step 3. (PyPI packaging is on the [roadmap](#-future-improvements).)
+That's the whole install — zero dependencies means there is no step 3. (A plain `pip install agentgauge` from PyPI is on the [roadmap](#-future-improvements).)
 
-To run the test suite:
+For development, clone instead:
 
 ```console
-$ pip install pytest
+$ git clone https://github.com/PreethamNoelP/agentgauge.git
+$ cd agentgauge
+$ pip install -e . pytest
 $ python -m pytest tests/
 ```
 
 ## ▶️ Usage
 
 ```console
-$ python -m agentgauge path/to/repo                  # scan a whole repo
-$ python -m agentgauge path/to/server.py             # or a single file
-$ python -m agentgauge path/to/repo --json           # machine-readable report
-$ python -m agentgauge path/to/repo --min-score 70   # CI gate: exit 1 below 70
+$ agentgauge path/to/repo                  # scan a whole repo
+$ agentgauge path/to/server.py             # or a single file
+$ agentgauge path/to/repo --json           # machine-readable report
+$ agentgauge path/to/repo --min-score 70   # CI gate: exit 1 below 70
 ```
+
+(`python -m agentgauge` works identically if you prefer module invocation.)
 
 As a GitHub Actions gate in any project:
 
 ```yaml
 - name: Governance scan
-  run: python -m agentgauge . --min-score 70
+  run: |
+    pip install git+https://github.com/PreethamNoelP/agentgauge.git
+    agentgauge . --min-score 70
 ```
 
 > Scanning agentgauge's own repository will flag `tests/fixtures/vulnerable_server.py` — it is *supposed* to be terrifying.
@@ -191,7 +196,7 @@ Real problems this project had to solve — documented with their remaining limi
 ## 🚀 Future Improvements
 
 - [ ] **Enforcing-position analysis** — require approval vocabulary to actually gate execution (kills the dead-variable false pass without full data-flow analysis)
-- [ ] **PyPI packaging** — `pip install agentgauge` + an `agentgauge` console command
+- [ ] **Publish to PyPI** — plain `pip install agentgauge`, no git URL needed
 - [ ] **Configurable vocabularies** — custom approval / logging / rate-limit / flag-name keyword lists
 - [ ] **Type-annotation evidence** — read `Literal` and Pydantic `Field` constraints as validation proof
 - [ ] **Config-file scanning** — catch permissive defaults living in `claude_desktop_config.json`, `mcp.json`, …
