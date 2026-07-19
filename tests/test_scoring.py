@@ -67,3 +67,14 @@ def test_findings_are_sorted_by_location():
     )
     locations = [(f.file, f.line) for f in report.findings]
     assert locations == sorted(locations)
+
+
+def test_score_contexts_accepts_a_lazy_iterable():
+    # The scanner streams contexts through a generator; scoring must never
+    # need the whole set at once.
+    report = score_contexts(
+        ctx(src, f"f{i}.py")
+        for i, src in enumerate([WIDE_OPEN, FULLY_GOVERNED])
+    )
+    assert report.files_scanned == 2
+    assert report.score == 55.0  # midpoint: one all-fail file, one all-pass
