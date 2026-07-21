@@ -53,14 +53,49 @@ def test_no_sensitive_calls_means_no_sites():
     assert (sites, passed, findings) == (0, 0, [])
 
 
-def test_known_limitation_mention_without_enforcement_still_passes():
-    # Documented gap: the heuristic is presence-based. An approval variable
-    # that never gates anything still passes. Catching this needs data-flow
-    # analysis; v1 accepts the false pass. If we ever add flow analysis,
-    # flipping this test's expectation is the definition of done.
-    sites, passed, _ = run(
+def test_dead_approval_variable_no_longer_grants_a_false_pass():
+    # Formerly a documented false pass: a name merely mentioning approval
+    # vocabulary satisfied the rule even if nothing ever checked it. Fixed
+    # by requiring an *enforcing position* (call, if/while/assert test, or
+    # decorator) -- a bare assignment no one reads is none of those.
+    sites, passed, findings = run(
         "def wipe(path):\n"
         "    approved = False\n"
+        "    shutil.rmtree(path)\n"
+    )
+    assert (sites, passed) == (1, 0)
+    assert len(findings) == 1
+
+
+def test_keyword_argument_named_like_approval_does_not_pass():
+    # "require_approval=False" passed to an unrelated call used to satisfy
+    # this rule on vocabulary alone (rule 6 catches the polarity). Only the
+    # callee's own name counts now, not the names of its keyword arguments.
+    sites, passed, _ = run(
+        "def wipe(path):\n"
+        "    configure(require_approval=False)\n"
+        "    shutil.rmtree(path)\n"
+    )
+    assert (sites, passed) == (1, 0)
+
+
+def test_if_test_naming_approval_passes():
+    # The vocabulary sits in the if's *test*, not in a dead assignment --
+    # an enforcing position even though the tested name is a bare Name,
+    # not a call.
+    sites, passed, _ = run(
+        "def wipe(path):\n"
+        "    approved = check_policy()\n"
+        "    if approved:\n"
+        "        shutil.rmtree(path)\n"
+    )
+    assert (sites, passed) == (1, 1)
+
+
+def test_assert_naming_approval_passes():
+    sites, passed, _ = run(
+        "def wipe(path):\n"
+        "    assert approved\n"
         "    shutil.rmtree(path)\n"
     )
     assert (sites, passed) == (1, 1)
