@@ -55,21 +55,31 @@ Global limitations, inherited by every rule:
 
 ## Rule 1 — Human oversight (`human-oversight`, 25 pts)
 
-**Heuristic:** every sensitive call must have approval *vocabulary* in its
-enclosing scope (the containing function including decorators; the whole
-module for top-level calls): an identifier containing `approv`, `confirm`,
-`consent`, `authoriz`, or `human`, or a call to builtin `input()`.
+**Heuristic:** every sensitive call must have approval *vocabulary*
+(`approv`, `confirm`, `consent`, `authoriz`, `human`, or builtin `input()`)
+in an **enforcing position** within its enclosing scope (the containing
+function including decorators; the whole module for top-level calls): the
+identifier must be the callee of a call, appear in the test of an
+`if`/`while`/`assert`, or name a decorator. A bare assignment or a keyword
+argument passed to an unrelated call does not count — those are never
+enforcing positions.
 
 - **Catches:** sensitive calls in functions with zero approval machinery —
-  the auto-executing agent tool.
-- **False passes:** presence ≠ enforcement. `approved = False` sitting
-  unused next to the call passes. `require_approval=False` also passes
-  this rule (rule 6 catches it). Trivially gameable by naming.
+  the auto-executing agent tool. Also catches the dead-variable and
+  wrong-keyword-argument shapes below, which earlier versions missed.
+- **False passes:** position ≠ correctness. `if approved: rmtree(path)`
+  passes even when `approved = True` is hardcoded two lines above with no
+  real check behind it — confirming the *position* is enforcing, not that
+  the tested value's truth ever came from an actual approval. That would
+  require full data-flow analysis, out of scope for a static heuristic.
 - **False failures:** approval enforced in a helper this function calls;
   teams using vocabulary we don't know ("vet", "greenlight").
-- **Planned:** require the identifier in an *enforcing position* (an
-  `if`/`while`/`assert` test, decorator, or call) — kills the dead-variable
-  false pass without full data-flow analysis. Configurable keyword list.
+- **Fixed (previously a false pass):** `approved = False` sitting unused
+  next to the call, or `require_approval=False` passed as a keyword
+  argument or parameter default, no longer satisfy this rule — neither is
+  an enforcing position. See "Cross-rule interactions" below.
+- **Planned:** configurable keyword list, so teams can add their own
+  approval vocabulary without editing source.
 
 ## Rule 2 — Audit logging (`audit-logging`, 20 pts)
 
@@ -167,9 +177,11 @@ flags (`require_approval`, `human_in_the_loop`, `verify`, `safe_mode`,
 
 ## Cross-rule interactions
 
-- `require_approval=False` **passes rule 1** (the word "approval" is in
-  scope) and **fails rule 6**. This is intentional layering: rule 6 exists
-  precisely because vocabulary presence says nothing about polarity.
+- `require_approval=False` **fails both rule 1 and rule 6**: it is not an
+  enforcing position (rule 1), and it is the dangerous polarity of a
+  recognized flag (rule 6). The two rules catch it for independent
+  reasons — rule 1 because nothing gates on it, rule 6 because if
+  something did, it would gate the wrong way.
 - A sensitive call is a site in **both** rule 1 and rule 4 — oversight and
   error handling are independent obligations for the same action.
 - Rules 2, 3, and 5 share the *tool function* population; a function
