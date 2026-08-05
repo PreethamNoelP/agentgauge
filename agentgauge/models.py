@@ -13,6 +13,7 @@ class Finding:
     line: int      # 1-based line number of the offending code
     message: str   # what is wrong, in plain language
     fix: str       # the concrete change that would clear this finding
+    critical: bool = False  # True if this alone must fail CI, independent of score
 
 
 @dataclass

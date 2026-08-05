@@ -31,3 +31,16 @@ def test_findings_are_immutable():
                 message="unguarded delete", fix="add approval check")
     with pytest.raises(dataclasses.FrozenInstanceError):
         f.line = 99
+
+
+def test_finding_defaults_to_not_critical():
+    f = Finding(rule="audit-logging", file="server.py", line=5,
+                message="no log call", fix="add logging")
+    assert f.critical is False
+
+
+def test_finding_can_be_marked_critical():
+    f = Finding(rule="human-oversight", file="server.py", line=10,
+                message="unguarded payment call", fix="add approval check",
+                critical=True)
+    assert f.critical is True
