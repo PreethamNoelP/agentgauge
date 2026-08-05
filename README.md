@@ -31,6 +31,7 @@ scanned 1 Python file(s)
   Permissive defaults                  0.0 / 10  (0/1 sites passed)
   ----------------------------------------------------------
   GOVERNANCE SCORE                     0.0 / 100
+  VERDICT                           FAIL_CRITICAL
 
 Findings (16):
 
@@ -70,6 +71,7 @@ Yet there is no `flake8` for agent governance. Security reviews of MCP servers a
 What makes it different:
 
 - **Site-based scoring, not file-based.** A category's score is the fraction of *applicable* sites that pass — a category with zero applicable sites scores full marks, because you can't fail a check that never applied.
+- **Two-tier verdict, not just a score.** The 0-100 score is an average across every site, which means one catastrophic miss can hide behind a hundred compliant ones — 99 fully-governed payment tools and 1 with no approval check still average out to 99.75/100. So alongside the score, every scan also produces a `verdict`: `PASS`, `FAIL_CRITICAL`, or `INCOMPLETE`. A single ungated **critical** action — payment, file deletion, shell exec, code exec, remote delete — sets `FAIL_CRITICAL` and fails CI outright, independent of `--min-score` and no matter how high the aggregate score climbs. `INCOMPLETE` means some files couldn't be parsed, so a clean result over a partial view isn't a full pass either. The score still tells you your general posture; the verdict tells you whether to ship.
 - **Honest about its limits.** Every heuristic's blind spots are documented in [RULES.md](RULES.md). A governance tool that hides its own blind spots would fail its own audit.
 - **Built for CI from day one.** Deterministic exit codes, `--min-score` gating, `--json` output.
 
@@ -122,15 +124,15 @@ Design decisions that matter:
 1. **Walk** — [scanner.py](agentgauge/scanner.py) collects `.py` files (skip lists for venvs, caches), parses each with `ast.parse` using encoding-safe reads.
 2. **Contextualize** — [astutils.py](agentgauge/astutils.py) builds a parent map and resolves dotted call names, then classifies *sites*: sensitive calls (`shutil.rmtree`, `subprocess.run`, payment APIs…), tool functions, risky parameters.
 3. **Check** — each of the six rules inspects its sites: vocabulary matching for oversight/logging/rate-limiting, structural analysis for error handling, name-based taint-style checks for validation.
-4. **Score** — [scoring.py](agentgauge/scoring.py) aggregates across files: `category score = weight × (passed sites / applicable sites)`; total is the sum over categories.
-5. **Report** — findings with file, line, rule ID, message, and fix; rendered for humans or as JSON; exit code encodes the CI verdict.
+4. **Score** — [scoring.py](agentgauge/scoring.py) aggregates across files: `category score = weight × (passed sites / applicable sites)`; total is the sum over categories. Independently, `verdict` is `FAIL_CRITICAL` if any finding is on a critical sink (payment, file delete, shell exec, code exec, remote delete), `INCOMPLETE` if any file couldn't be parsed, else `PASS` — the verdict cannot be bought back by a high score.
+5. **Report** — findings with file, line, rule ID, message, fix, and a `critical` flag; rendered for humans or as JSON; exit code encodes the verdict.
 
 Exit codes (the CI contract):
 
 | Code | Meaning |
 |---|---|
-| `0` | scan completed (and met `--min-score`, if given) |
-| `1` | score below `--min-score` |
+| `0` | scan completed, met `--min-score` (if given), and verdict is not `FAIL_CRITICAL` |
+| `1` | score below `--min-score`, **or** verdict is `FAIL_CRITICAL` — a single ungated critical action fails the build regardless of `--min-score` or how high the score is |
 | `2` | bad invocation: target missing, or **zero Python files scanned** — a score over zero evidence is never reported as a pass |
 
 ## 🛠️ Installation & Setup

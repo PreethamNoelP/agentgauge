@@ -21,6 +21,15 @@ Category points = `weight × passed / sites`. Two consequences:
    (typo'd path, pure-JS repo, everything unparseable), the CLI refuses to
    print a score and exits `2`. A 100/100 earned by looking at nothing must
    never look like a passing grade in CI.
+3. **Averaging can't buy back a critical miss.** The score is an average
+   across sites, so one catastrophic site can be diluted by many compliant
+   ones — 99 fully-governed payment tools plus 1 with no approval check
+   still average to 99.75/100. `ScanReport.verdict` is the independent gate:
+   any human-oversight finding on a critical sink (`payment`, `file delete`,
+   `shell exec`, `code exec`, `remote delete` — see `astutils.is_critical`)
+   sets `FAIL_CRITICAL`, which fails CI regardless of `--min-score` or how
+   high the aggregate score is. `INCOMPLETE` means a file couldn't be
+   parsed, so a clean result over a partial view isn't a full pass either.
 
 | Category | Weight | Sites are... |
 |---|---|---|
