@@ -17,6 +17,7 @@ from agentgauge.astutils import (
     call_name,
     dotted_name,
     enclosing_function,
+    is_critical,
     iter_identifiers,
     iter_sensitive_calls,
 )
@@ -79,6 +80,7 @@ def check(ctx: FileContext) -> tuple[int, int, list[Finding]]:
                         "has no human-approval check in scope",
                 fix="Gate the call behind an explicit approval, e.g. "
                     "`if not request_approval(...): return` before it executes",
+                critical=is_critical(label),
             )
         )
     return sites, passed, findings

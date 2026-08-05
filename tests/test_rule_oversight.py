@@ -16,6 +16,7 @@ def test_unguarded_sensitive_call_fails():
     assert len(findings) == 1
     assert findings[0].line == 3
     assert "file delete" in findings[0].message
+    assert findings[0].critical is True
 
 
 def test_guard_clause_approval_passes():
