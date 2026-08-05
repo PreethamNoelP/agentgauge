@@ -51,6 +51,18 @@ SENSITIVE_SUFFIX: dict[str, str] = {
     "payout": "payment",
 }
 
+# Consequence categories severe enough that a single missed approval gate
+# must fail CI outright -- no volume of compliant sites elsewhere should be
+# able to average this away (score averaging otherwise dilutes one
+# catastrophic site across many low-risk ones; see issue #1).
+CRITICAL_LABELS = {"file delete", "shell exec", "code exec", "payment", "remote delete"}
+
+
+def is_critical(label: str) -> bool:
+    """True if a sensitive-call label names a critical-consequence sink."""
+    return label in CRITICAL_LABELS
+
+
 FunctionNode = ast.FunctionDef | ast.AsyncFunctionDef
 
 

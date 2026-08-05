@@ -4,6 +4,7 @@ from agentgauge.astutils import (
     build_parent_map,
     call_name,
     enclosing_function,
+    is_critical,
     iter_sensitive_calls,
     sensitive_label,
 )
@@ -51,6 +52,19 @@ def test_iter_sensitive_calls_finds_all_and_only_sensitive():
     src = "shutil.rmtree(tmp)\nprint('hi')\ngateway.charge(9)\n"
     labels = sorted(label for _, label in iter_sensitive_calls(ast.parse(src)))
     assert labels == ["file delete", "payment"]
+
+
+# --- is it a critical-consequence sink? ---
+
+def test_every_sensitive_label_is_critical():
+    # Today's sensitive-call vocabulary is entirely made of the five
+    # catastrophic consequence categories -- there is no low-risk sink yet.
+    labels = {"file delete", "shell exec", "code exec", "payment", "remote delete"}
+    assert all(is_critical(label) for label in labels)
+
+
+def test_unknown_label_is_not_critical():
+    assert is_critical("some future low-risk label") is False
 
 
 # --- what surrounds a node? ---
