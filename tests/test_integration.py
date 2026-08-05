@@ -25,6 +25,7 @@ def test_vulnerable_server_scores_zero_and_every_category_fires():
 
     assert report.score == 0.0
     assert {f.rule for f in report.findings} == ALL_RULE_IDS
+    assert report.verdict == "FAIL_CRITICAL"
 
 
 def test_clean_server_scores_perfect_with_no_findings():
@@ -34,6 +35,7 @@ def test_clean_server_scores_perfect_with_no_findings():
 
     assert report.score == 100.0
     assert report.findings == []
+    assert report.verdict == "PASS"
 
 
 def test_python_dash_m_entrypoint_end_to_end():
@@ -61,3 +63,16 @@ def test_min_score_gate_end_to_end():
         cwd=PROJECT_ROOT,
     )
     assert proc.returncode == 1
+
+
+def test_critical_verdict_fails_end_to_end_without_min_score():
+    # No --min-score at all: a live critical finding must still fail the
+    # build (issue #1) rather than defaulting to a pass.
+    proc = subprocess.run(
+        [sys.executable, "-m", "agentgauge", str(FIXTURES / "vulnerable_server.py")],
+        capture_output=True,
+        text=True,
+        cwd=PROJECT_ROOT,
+    )
+    assert proc.returncode == 1
+    assert "FAIL_CRITICAL" in proc.stdout

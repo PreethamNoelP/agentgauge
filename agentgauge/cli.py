@@ -1,8 +1,10 @@
 """Command-line interface: `python -m agentgauge <path> [--json] [--min-score N]`.
 
 Exit codes are the contract for CI:
-  0  scan completed (and met --min-score, if given)
-  1  score below --min-score
+  0  scan completed, met --min-score (if given), and no critical failures
+  1  score below --min-score, OR the verdict is FAIL_CRITICAL -- a single
+     ungated critical action (payment, file delete, shell exec, ...) fails
+     the build regardless of --min-score or how high the aggregate score is
   2  bad invocation (target missing, or no Python files actually scanned)
 """
 
@@ -28,6 +30,7 @@ def _print_report(report: ScanReport, target: str) -> None:
         print(f"  {c.name:<34}{c.score:>6.1f} / {c.weight:<3} {status}")
     print("  " + "-" * 58)
     print(f"  {'GOVERNANCE SCORE':<34}{report.score:>6.1f} / 100")
+    print(f"  {'VERDICT':<34}{report.verdict}")
 
     if report.findings:
         print(f"\nFindings ({len(report.findings)}):")
@@ -86,6 +89,8 @@ def main(argv: list[str] | None = None) -> int:
     else:
         _print_report(report, args.target)
 
+    if report.verdict == "FAIL_CRITICAL":
+        return 1
     if args.min_score is not None and report.score < args.min_score:
         return 1
     return 0

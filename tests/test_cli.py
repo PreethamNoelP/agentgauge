@@ -24,6 +24,31 @@ def test_min_score_gate_returns_one(tmp_path, capsys):
     assert "fix:" in capsys.readouterr().out  # findings still printed
 
 
+def test_critical_finding_returns_one_even_without_min_score(tmp_path, capsys):
+    # A live, unguarded critical action must fail the build on its own --
+    # no --min-score needed to catch it (issue #1).
+    (tmp_path / "bad.py").write_text(
+        "def wipe(path):\n    shutil.rmtree(path)\n"
+    )
+
+    code = main([str(tmp_path)])
+
+    assert code == 1
+    assert "FAIL_CRITICAL" in capsys.readouterr().out
+
+
+def test_critical_finding_returns_one_even_above_min_score(tmp_path, capsys):
+    # A permissive --min-score must not buy back a pass on a critical
+    # finding just because the aggregate score clears the bar.
+    (tmp_path / "bad.py").write_text(
+        "def wipe(path):\n    shutil.rmtree(path)\n"
+    )
+
+    code = main([str(tmp_path), "--min-score", "1"])
+
+    assert code == 1
+
+
 def test_json_output_is_parseable(tmp_path, capsys):
     (tmp_path / "flags.py").write_text("auto_approve = True\n")
 
@@ -32,7 +57,9 @@ def test_json_output_is_parseable(tmp_path, capsys):
     data = json.loads(capsys.readouterr().out)
     assert code == 0
     assert data["score"] == 90.0
+    assert data["verdict"] == "PASS"
     assert data["findings"][0]["rule"] == "permissive-defaults"
+    assert data["findings"][0]["critical"] is False
 
 
 def test_missing_target_returns_two(capsys):
