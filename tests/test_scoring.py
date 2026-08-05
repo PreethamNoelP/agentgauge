@@ -1,3 +1,5 @@
+import pytest
+
 from agentgauge.astutils import FileContext
 from agentgauge.scoring import ALL_RULES, score_contexts
 
@@ -78,3 +80,79 @@ def test_score_contexts_accepts_a_lazy_iterable():
     )
     assert report.files_scanned == 2
     assert report.score == 55.0  # midpoint: one all-fail file, one all-pass
+
+
+# --- verdict: a gate independent of the 0-100 score (issue #1) ---
+
+def test_clean_scan_verdict_is_pass():
+    report = score_contexts([ctx("def add(a, b):\n    return a + b\n")])
+    assert report.verdict == "PASS"
+
+
+def test_critical_finding_fails_verdict_regardless_of_score():
+    report = score_contexts([ctx(WIDE_OPEN)])
+    assert report.verdict == "FAIL_CRITICAL"
+
+
+def test_non_critical_finding_alone_does_not_fail_verdict():
+    # A permissive-defaults finding with no accompanying sensitive call is
+    # not critical; it must lower the score without tripping the gate.
+    report = score_contexts([ctx("auto_approve = True\n")])
+    assert report.findings and not any(f.critical for f in report.findings)
+    assert report.verdict == "PASS"
+
+
+def test_skipped_files_mark_verdict_incomplete():
+    report = score_contexts([ctx(FULLY_GOVERNED)])
+    report.skipped = ["broken.py: syntax error at line 1"]
+    assert report.verdict == "INCOMPLETE"
+
+
+def _governed_payment_tool(i: int) -> str:
+    return (
+        f"@mcp.tool()\n"
+        f"def pay_{i}(amount):\n"
+        "    if amount <= 0:\n"
+        "        raise ValueError('bad amount')\n"
+        "    if not request_approval('pay', amount):\n"
+        "        return False\n"
+        "    rate_limiter.acquire()\n"
+        "    try:\n"
+        "        gateway.charge(amount)\n"
+        "    except OSError as exc:\n"
+        "        logger.error('pay failed: %s', exc)\n"
+        "        return False\n"
+        "    audit_log('pay', amount)\n"
+        "    return True\n\n"
+    )
+
+
+def _payment_tool_missing_approval(i: int) -> str:
+    return (
+        f"@mcp.tool()\n"
+        f"def pay_{i}(amount):\n"
+        "    if amount <= 0:\n"
+        "        raise ValueError('bad amount')\n"
+        "    rate_limiter.acquire()\n"
+        "    try:\n"
+        "        gateway.charge(amount)\n"
+        "    except OSError as exc:\n"
+        "        logger.error('pay failed: %s', exc)\n"
+        "        return False\n"
+        "    audit_log('pay', amount)\n"
+        "    return True\n\n"
+    )
+
+
+def test_single_ungated_critical_action_cannot_be_diluted_to_a_pass():
+    # Regression for issue #1 ("critical-site dilution"): 99 fully-governed
+    # payment tools plus one missing only its approval check scored 99.75
+    # and sailed past --min-score 90 despite a live, unguarded payment call.
+    # The verdict must catch what the averaged score hides.
+    src = _payment_tool_missing_approval(0) + "".join(
+        _governed_payment_tool(i) for i in range(1, 100)
+    )
+    report = score_contexts([ctx(src)])
+
+    assert report.score == pytest.approx(99.75)
+    assert report.verdict == "FAIL_CRITICAL"

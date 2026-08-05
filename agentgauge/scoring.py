@@ -40,6 +40,22 @@ class ScanReport:
         return sum(c.score for c in self.categories)
 
     @property
+    def verdict(self) -> str:
+        """PASS / FAIL_CRITICAL / INCOMPLETE -- a gate independent of the
+        0-100 score. A single ungated critical action (payment, file
+        delete, shell exec, code exec, remote delete) must fail outright;
+        averaging it against every other compliant site would dilute a
+        catastrophic finding into a passing score (issue #1). Skipped files
+        mean the scan didn't see the whole picture, so a clean result over
+        a partial view is not a full PASS either.
+        """
+        if any(f.critical for f in self.findings):
+            return "FAIL_CRITICAL"
+        if self.skipped:
+            return "INCOMPLETE"
+        return "PASS"
+
+    @property
     def findings(self) -> list[Finding]:
         """All findings across categories, ordered by location."""
         return sorted(
@@ -50,6 +66,7 @@ class ScanReport:
     def to_dict(self) -> dict:
         return {
             "score": round(self.score, 1),
+            "verdict": self.verdict,
             "files_scanned": self.files_scanned,
             "categories": [
                 {
