@@ -97,3 +97,13 @@ def test_loop_and_call_sites_both_counted():
 def test_no_sites_in_benign_code():
     sites, passed, findings = run("def add(a, b):\n    return a + b\n")
     assert (sites, passed, findings) == (0, 0, [])
+
+
+def test_aliased_import_sensitive_call_is_still_a_site():
+    sites, passed, findings = run(
+        "import subprocess as sp\n"
+        "def run_it(cmd):\n"
+        "    sp.run(cmd, shell=True)\n"
+    )
+    assert (sites, passed) == (1, 0)
+    assert "subprocess.run" in findings[0].message

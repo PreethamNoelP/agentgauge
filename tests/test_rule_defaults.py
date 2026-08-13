@@ -1,9 +1,10 @@
 from agentgauge.astutils import FileContext
+from agentgauge.config import RuleConfig
 from agentgauge.rules import defaults
 
 
-def run(src: str):
-    return defaults.check(FileContext.from_source(src, path="mem.py"))
+def run(src: str, config: RuleConfig | None = None):
+    return defaults.check(FileContext.from_source(src, path="mem.py", config=config))
 
 
 def test_auto_approve_true_assignment_fails():
@@ -54,3 +55,16 @@ def test_non_constant_binding_is_not_a_site():
 def test_no_flags_means_no_sites():
     sites, passed, findings = run("x = 1\ndo_thing(y=2)\n")
     assert (sites, passed, findings) == (0, 0, [])
+
+
+def test_extra_dangerous_when_true_flag_from_config_is_recognized():
+    config = RuleConfig(dangerous_when_true=frozenset({"yolo_mode"}))
+    sites, passed, findings = run("yolo_mode = True\n", config=config)
+    assert (sites, passed) == (1, 0)
+    assert "yolo_mode" in findings[0].message
+
+
+def test_extra_dangerous_when_true_flag_matches_regardless_of_underscores():
+    config = RuleConfig(dangerous_when_true=frozenset({"yolo_mode"}))
+    sites, passed, _ = run("YOLOMODE = True\n", config=config)
+    assert (sites, passed) == (1, 0)

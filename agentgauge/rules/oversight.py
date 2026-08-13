@@ -31,9 +31,10 @@ WEIGHT = 25
 APPROVAL_MARKERS = ("approv", "confirm", "consent", "authoriz", "human")
 
 
-def _mentions_marker(name: str) -> bool:
+def _mentions_marker(name: str, extra_markers: tuple[str, ...]) -> bool:
     lowered = name.lower()
-    return lowered == "input" or any(marker in lowered for marker in APPROVAL_MARKERS)
+    markers = APPROVAL_MARKERS + extra_markers
+    return lowered == "input" or any(marker in lowered for marker in markers)
 
 
 def _decorator_name(dec: ast.expr) -> str | None:
@@ -41,33 +42,34 @@ def _decorator_name(dec: ast.expr) -> str | None:
     return dotted_name(target)
 
 
-def _has_approval_signal(scope: ast.AST) -> bool:
+def _has_approval_signal(scope: ast.AST, extra_markers: tuple[str, ...]) -> bool:
     for node in ast.walk(scope):
         if isinstance(node, ast.Call):
             name = call_name(node)
-            if name is not None and _mentions_marker(name):
+            if name is not None and _mentions_marker(name, extra_markers):
                 return True
         elif isinstance(node, (ast.If, ast.While)):
-            if any(_mentions_marker(i) for i in iter_identifiers(node.test)):
+            if any(_mentions_marker(i, extra_markers) for i in iter_identifiers(node.test)):
                 return True
         elif isinstance(node, ast.Assert):
-            if any(_mentions_marker(i) for i in iter_identifiers(node.test)):
+            if any(_mentions_marker(i, extra_markers) for i in iter_identifiers(node.test)):
                 return True
         elif isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
             for dec in node.decorator_list:
                 name = _decorator_name(dec)
-                if name is not None and _mentions_marker(name):
+                if name is not None and _mentions_marker(name, extra_markers):
                     return True
     return False
 
 
 def check(ctx: FileContext) -> tuple[int, int, list[Finding]]:
     sites, passed, findings = 0, 0, []
-    for call, label in iter_sensitive_calls(ctx.tree):
+    extra_markers = ctx.config.approval_markers
+    for call, label in iter_sensitive_calls(ctx.tree, ctx.import_aliases):
         sites += 1
         fn = enclosing_function(call, ctx.parents)
         scope = fn if fn is not None else ctx.tree
-        if _has_approval_signal(scope):
+        if _has_approval_signal(scope, extra_markers):
             passed += 1
             continue
         where = f"in '{fn.name}'" if fn is not None else "at module level"
@@ -76,7 +78,7 @@ def check(ctx: FileContext) -> tuple[int, int, list[Finding]]:
                 rule=RULE_ID,
                 file=ctx.path,
                 line=call.lineno,
-                message=f"{label} call '{call_name(call)}' {where} "
+                message=f"{label} call '{call_name(call, ctx.import_aliases)}' {where} "
                         "has no human-approval check in scope",
                 fix="Gate the call behind an explicit approval, e.g. "
                     "`if not request_approval(...): return` before it executes",

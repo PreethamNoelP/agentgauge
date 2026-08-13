@@ -69,13 +69,22 @@ def _flag_bindings(tree: ast.AST):
 
 def check(ctx: FileContext) -> tuple[int, int, list[Finding]]:
     sites, passed, findings = 0, 0, []
+    # Config-supplied flag names go through the same _collapsed() normalization
+    # as the built-in tables, so "extra_dangerous_when_true = ['yolo_mode']"
+    # matches YOLO_MODE / yoloMode / yolo-mode identically to a built-in entry.
+    dangerous_when_true = DANGEROUS_WHEN_TRUE | {
+        _collapsed(n) for n in ctx.config.dangerous_when_true
+    }
+    dangerous_when_false = DANGEROUS_WHEN_FALSE | {
+        _collapsed(n) for n in ctx.config.dangerous_when_false
+    }
     for name, value, lineno in _flag_bindings(ctx.tree):
         if not (isinstance(value, ast.Constant) and isinstance(value.value, bool)):
             continue
         collapsed = _collapsed(name)
-        if collapsed in DANGEROUS_WHEN_TRUE:
+        if collapsed in dangerous_when_true:
             safe = value.value is False
-        elif collapsed in DANGEROUS_WHEN_FALSE:
+        elif collapsed in dangerous_when_false:
             safe = value.value is True
         else:
             continue

@@ -24,22 +24,23 @@ WEIGHT = 20
 LOG_TOKENS = {"log", "logger", "logging", "logged", "audit", "auditing", "audited"}
 
 
-def _makes_log_call(fn: ast.AST) -> bool:
+def _makes_log_call(fn: ast.AST, log_tokens: frozenset[str]) -> bool:
     for node in ast.walk(fn):
         if isinstance(node, ast.Call):
             name = call_name(node)
-            if name is not None and name_tokens(name) & LOG_TOKENS:
+            if name is not None and name_tokens(name) & log_tokens:
                 return True
     return False
 
 
 def check(ctx: FileContext) -> tuple[int, int, list[Finding]]:
     sites, passed, findings = 0, 0, []
+    log_tokens = LOG_TOKENS | ctx.config.log_tokens
     for fn in iter_functions(ctx.tree):
-        if not is_tool_function(fn):
+        if not is_tool_function(fn, ctx.import_aliases):
             continue
         sites += 1
-        if _makes_log_call(fn):
+        if _makes_log_call(fn, log_tokens):
             passed += 1
             continue
         findings.append(

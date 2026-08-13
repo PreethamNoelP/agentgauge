@@ -1,9 +1,10 @@
 from agentgauge.astutils import FileContext
+from agentgauge.config import RuleConfig
 from agentgauge.rules import audit
 
 
-def run(src: str):
-    return audit.check(FileContext.from_source(src, path="mem.py"))
+def run(src: str, config: RuleConfig | None = None):
+    return audit.check(FileContext.from_source(src, path="mem.py", config=config))
 
 
 def test_mcp_tool_without_logging_fails():
@@ -58,3 +59,12 @@ def test_undecorated_function_with_sensitive_call_is_a_site():
 def test_plain_helper_is_not_a_site():
     sites, passed, findings = run("def add(a, b):\n    return a + b\n")
     assert (sites, passed, findings) == (0, 0, [])
+
+
+def test_extra_log_token_from_config_is_recognized():
+    config = RuleConfig(log_tokens=frozenset({"telemetry"}))
+    sites, passed, _ = run(
+        "@mcp.tool()\ndef fetch(url):\n    telemetry.record(url)\n    return http.get(url)\n",
+        config=config,
+    )
+    assert (sites, passed) == (1, 1)

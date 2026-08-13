@@ -26,23 +26,35 @@ WEIGHT = 15
 RATE_MARKERS = ("ratelimit", "throttle", "limiter")
 
 
-def _mentions_rate_limit(fn: ast.AST) -> bool:
+def _mentions_rate_limit(fn: ast.AST, extra_markers: tuple[str, ...]) -> bool:
+    markers = RATE_MARKERS + extra_markers
     for ident in iter_identifiers(fn):
         collapsed = ident.lower().replace("_", "")
         if collapsed == "limits":  # the ratelimit library's @limits decorator
             return True
-        if any(marker in collapsed for marker in RATE_MARKERS):
+        if any(marker in collapsed for marker in markers):
             return True
     return False
 
 
 def check(ctx: FileContext) -> tuple[int, int, list[Finding]]:
+    if ctx.config.assume_external_rate_limiting:
+        # Infra-level limiting (API gateway, global semaphore) is out of
+        # view for a static scan; treat the category as not applicable
+        # rather than penalizing every tool function for a control that
+        # exists, just not in this source.
+        return 0, 0, []
+
     sites, passed, findings = 0, 0, []
+    # Collapsed the same way _mentions_rate_limit collapses the identifiers
+    # it tests against, so an underscored config entry like "rate_limit"
+    # still matches identifiers such as "rate_limit_check".
+    extra_markers = tuple(m.replace("_", "") for m in ctx.config.rate_markers)
     for fn in iter_functions(ctx.tree):
-        if not is_tool_function(fn):
+        if not is_tool_function(fn, ctx.import_aliases):
             continue
         sites += 1
-        if _mentions_rate_limit(fn):
+        if _mentions_rate_limit(fn, extra_markers):
             passed += 1
             continue
         findings.append(

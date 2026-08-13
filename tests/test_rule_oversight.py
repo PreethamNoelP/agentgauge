@@ -1,9 +1,10 @@
 from agentgauge.astutils import FileContext
+from agentgauge.config import RuleConfig
 from agentgauge.rules import oversight
 
 
-def run(src: str):
-    return oversight.check(FileContext.from_source(src, path="mem.py"))
+def run(src: str, config: RuleConfig | None = None):
+    return oversight.check(FileContext.from_source(src, path="mem.py", config=config))
 
 
 def test_unguarded_sensitive_call_fails():
@@ -98,5 +99,41 @@ def test_assert_naming_approval_passes():
         "def wipe(path):\n"
         "    assert approved\n"
         "    shutil.rmtree(path)\n"
+    )
+    assert (sites, passed) == (1, 1)
+
+
+def test_aliased_import_sensitive_call_is_still_a_site():
+    # The documented blind spot: `import subprocess as sp; sp.run(...)` used
+    # to be invisible to the sensitive-call table entirely.
+    sites, passed, findings = run(
+        "import subprocess as sp\n"
+        "def run_it(cmd):\n"
+        "    sp.run(cmd, shell=True)\n"
+    )
+    assert (sites, passed) == (1, 0)
+    assert "shell exec" in findings[0].message
+    assert "subprocess.run" in findings[0].message
+
+
+def test_aliased_import_sensitive_call_can_be_guarded():
+    sites, passed, findings = run(
+        "import subprocess as sp\n"
+        "def run_it(cmd):\n"
+        "    if not request_approval('run', cmd):\n"
+        "        return\n"
+        "    sp.run(cmd, shell=True)\n"
+    )
+    assert (sites, passed, findings) == (1, 1, [])
+
+
+def test_extra_approval_marker_from_config_is_recognized():
+    config = RuleConfig(approval_markers=("greenlight",))
+    sites, passed, _ = run(
+        "def wipe(path):\n"
+        "    if not greenlight(path):\n"
+        "        return\n"
+        "    shutil.rmtree(path)\n",
+        config=config,
     )
     assert (sites, passed) == (1, 1)

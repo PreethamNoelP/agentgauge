@@ -86,7 +86,7 @@ def check(ctx: FileContext) -> tuple[int, int, list[Finding]]:
             )
         )
 
-    for call, label in iter_sensitive_calls(ctx.tree):
+    for call, label in iter_sensitive_calls(ctx.tree, ctx.import_aliases):
         sites += 1
         if _in_try_body(call, ctx.parents):
             passed += 1
@@ -96,7 +96,8 @@ def check(ctx: FileContext) -> tuple[int, int, list[Finding]]:
                 rule=RULE_ID,
                 file=ctx.path,
                 line=call.lineno,
-                message=f"{label} call '{call_name(call)}' is not wrapped in try/except",
+                message=f"{label} call '{call_name(call, ctx.import_aliases)}' "
+                        "is not wrapped in try/except",
                 fix="Wrap the call in try/except; log the failure and return a "
                     "safe error to the caller instead of crashing",
             )

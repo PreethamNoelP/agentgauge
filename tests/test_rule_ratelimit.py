@@ -1,9 +1,10 @@
 from agentgauge.astutils import FileContext
+from agentgauge.config import RuleConfig
 from agentgauge.rules import ratelimit
 
 
-def run(src: str):
-    return ratelimit.check(FileContext.from_source(src, path="mem.py"))
+def run(src: str, config: RuleConfig | None = None):
+    return ratelimit.check(FileContext.from_source(src, path="mem.py", config=config))
 
 
 def test_tool_without_rate_limit_fails():
@@ -59,3 +60,21 @@ def test_generic_limit_param_does_not_count():
 def test_plain_helper_is_not_a_site():
     sites, passed, findings = run("def add(a, b):\n    return a + b\n")
     assert (sites, passed, findings) == (0, 0, [])
+
+
+def test_assume_external_rate_limiting_makes_every_tool_not_applicable():
+    config = RuleConfig(assume_external_rate_limiting=True)
+    sites, passed, findings = run(
+        "@mcp.tool()\ndef fetch(url):\n    return http.get(url)\n",
+        config=config,
+    )
+    assert (sites, passed, findings) == (0, 0, [])
+
+
+def test_extra_rate_marker_from_config_is_recognized():
+    config = RuleConfig(rate_markers=("throughput_cap",))
+    sites, passed, _ = run(
+        "@mcp.tool()\ndef fetch(url):\n    throughput_cap.check()\n    return http.get(url)\n",
+        config=config,
+    )
+    assert (sites, passed) == (1, 1)
