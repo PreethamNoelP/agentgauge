@@ -1,8 +1,11 @@
 import ast
 
 from agentgauge.astutils import (
+    FileContext,
+    build_import_aliases,
     build_parent_map,
     call_name,
+    dotted_name,
     enclosing_function,
     is_critical,
     iter_sensitive_calls,
@@ -88,3 +91,103 @@ def test_enclosing_function_none_at_module_level():
     parents = build_parent_map(tree)
     call = next(n for n in ast.walk(tree) if isinstance(n, ast.Call))
     assert enclosing_function(call, parents) is None
+
+
+# --- import aliasing ---
+
+def test_build_import_aliases_maps_module_asname():
+    tree = ast.parse("import subprocess as sp\n")
+    assert build_import_aliases(tree) == {"sp": "subprocess"}
+
+
+def test_build_import_aliases_maps_from_import_asname():
+    tree = ast.parse("from shutil import rmtree as rt\n")
+    assert build_import_aliases(tree) == {"rt": "shutil.rmtree"}
+
+
+def test_build_import_aliases_ignores_unaliased_imports():
+    # `import os.path` and `from shutil import rmtree` need no alias entry:
+    # dotted_name already walks the plain Attribute chain / bare Name.
+    tree = ast.parse("import os.path\nfrom shutil import rmtree\n")
+    assert build_import_aliases(tree) == {}
+
+
+def test_build_import_aliases_skips_relative_imports():
+    tree = ast.parse("from . import helper as h\n")
+    assert build_import_aliases(tree) == {}
+
+
+def test_dotted_name_resolves_module_alias():
+    aliases = {"sp": "subprocess"}
+    assert dotted_name(first_call("sp.run(cmd)").func, aliases) == "subprocess.run"
+
+
+def test_dotted_name_resolves_bare_name_alias():
+    aliases = {"rt": "shutil.rmtree"}
+    assert dotted_name(first_call("rt(path)").func, aliases) == "shutil.rmtree"
+
+
+def test_dotted_name_without_aliases_is_unchanged():
+    # Default (no aliases arg) behaves exactly as before this feature existed.
+    assert dotted_name(first_call("sp.run(cmd)").func) == "sp.run"
+
+
+def test_sensitive_label_sees_through_module_import_alias():
+    # The documented blind spot in RULES.md: `import subprocess as sp; sp.run(...)`.
+    aliases = {"sp": "subprocess"}
+    assert sensitive_label(first_call("sp.run(cmd, shell=True)"), aliases) == "shell exec"
+
+
+def test_sensitive_label_sees_through_from_import_alias():
+    aliases = {"rt": "shutil.rmtree"}
+    assert sensitive_label(first_call("rt(path)"), aliases) == "file delete"
+
+
+def test_iter_sensitive_calls_accepts_aliases():
+    src = "import subprocess as sp\nsp.run(cmd)\n"
+    tree = ast.parse(src)
+    aliases = build_import_aliases(tree)
+    labels = [label for _, label in iter_sensitive_calls(tree, aliases)]
+    assert labels == ["shell exec"]
+
+
+# --- inline suppression comments ---
+
+def test_is_suppressed_for_unqualified_ignore_comment():
+    ctx = FileContext.from_source(
+        "shutil.rmtree(path)  # agentgauge: ignore\n", path="mem.py"
+    )
+    assert ctx.is_suppressed("human-oversight", 1) is True
+    assert ctx.is_suppressed("error-handling", 1) is True
+
+
+def test_is_suppressed_for_rule_scoped_ignore_comment():
+    ctx = FileContext.from_source(
+        "shutil.rmtree(path)  # agentgauge: ignore[human-oversight]\n", path="mem.py"
+    )
+    assert ctx.is_suppressed("human-oversight", 1) is True
+    assert ctx.is_suppressed("error-handling", 1) is False
+
+
+def test_is_suppressed_for_multiple_rule_scoped_ignore_comment():
+    ctx = FileContext.from_source(
+        "shutil.rmtree(path)  # agentgauge: ignore[human-oversight, error-handling]\n",
+        path="mem.py",
+    )
+    assert ctx.is_suppressed("human-oversight", 1) is True
+    assert ctx.is_suppressed("error-handling", 1) is True
+    assert ctx.is_suppressed("audit-logging", 1) is False
+
+
+def test_is_suppressed_is_false_for_unmarked_lines():
+    ctx = FileContext.from_source("shutil.rmtree(path)\n", path="mem.py")
+    assert ctx.is_suppressed("human-oversight", 1) is False
+
+
+def test_suppression_marker_in_a_string_literal_is_not_a_comment():
+    # Only real COMMENT tokens count -- a string that happens to contain the
+    # marker text must not accidentally suppress anything.
+    ctx = FileContext.from_source(
+        'msg = "# agentgauge: ignore"\nshutil.rmtree(path)\n', path="mem.py"
+    )
+    assert ctx.is_suppressed("human-oversight", 2) is False
