@@ -1,11 +1,12 @@
 import pytest
 
 from agentgauge.astutils import FileContext
+from agentgauge.config import RuleConfig
 from agentgauge.scoring import ALL_RULES, score_contexts
 
 
-def ctx(src: str, path: str = "mem.py") -> FileContext:
-    return FileContext.from_source(src, path=path)
+def ctx(src: str, path: str = "mem.py", config: RuleConfig | None = None) -> FileContext:
+    return FileContext.from_source(src, path=path, config=config)
 
 
 WIDE_OPEN = (
@@ -156,3 +157,71 @@ def test_single_ungated_critical_action_cannot_be_diluted_to_a_pass():
 
     assert report.score == pytest.approx(99.75)
     assert report.verdict == "FAIL_CRITICAL"
+
+
+# --- disabled rules (config-driven) ---
+
+def test_disabling_a_rule_removes_its_category_and_shrinks_max_score():
+    config = RuleConfig(disabled_rules=frozenset({"rate-limiting"}))
+    report = score_contexts(
+        [ctx("@mcp.tool()\ndef fetch(url):\n    return http.get(url)\n", config=config)],
+        disabled_rules=config.disabled_rules,
+    )
+    assert "Rate limiting" not in {c.name for c in report.categories}
+    assert report.max_score == 85
+
+
+def test_disabled_rule_findings_never_appear():
+    config = RuleConfig(disabled_rules=frozenset({"rate-limiting"}))
+    report = score_contexts(
+        [ctx("@mcp.tool()\ndef fetch(url):\n    return http.get(url)\n", config=config)],
+        disabled_rules=config.disabled_rules,
+    )
+    assert all(f.rule != "rate-limiting" for f in report.findings)
+
+
+def test_no_disabled_rules_keeps_max_score_at_100():
+    report = score_contexts([ctx("x = 1\n")])
+    assert report.max_score == 100
+
+
+# --- inline suppression ---
+
+def test_suppressed_finding_counts_as_passed_and_is_hidden():
+    report = score_contexts(
+        [ctx("auto_approve = True  # agentgauge: ignore\n")]
+    )
+    assert report.findings == []
+    assert report.suppressed == 1
+    defaults_cat = next(c for c in report.categories if c.name == "Permissive defaults")
+    assert (defaults_cat.sites, defaults_cat.passed) == (1, 1)
+
+
+def test_suppression_scoped_to_a_different_rule_does_not_apply():
+    report = score_contexts(
+        [ctx("auto_approve = True  # agentgauge: ignore[human-oversight]\n")]
+    )
+    assert len(report.findings) == 1
+    assert report.findings[0].rule == "permissive-defaults"
+
+
+def test_suppressing_a_critical_finding_still_forces_fail_critical():
+    # A one-line comment must not be able to buy back the one guarantee
+    # that score-averaging itself is barred from buying back (issue #1).
+    report = score_contexts(
+        [ctx(
+            "def wipe(path):\n"
+            "    shutil.rmtree(path)  # agentgauge: ignore[human-oversight]\n"
+        )]
+    )
+    assert all(f.rule != "human-oversight" for f in report.findings)  # noise gone...
+    assert report.critical_suppressed == 1
+    assert report.verdict == "FAIL_CRITICAL"  # ...but the gate still holds
+
+
+def test_suppressing_a_non_critical_finding_does_not_affect_verdict():
+    report = score_contexts(
+        [ctx("auto_approve = True  # agentgauge: ignore\n")]
+    )
+    assert report.critical_suppressed == 0
+    assert report.verdict == "PASS"
