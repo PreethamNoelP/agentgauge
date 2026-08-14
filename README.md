@@ -77,36 +77,43 @@ What makes it different:
 
 ## ✨ Key Features
 
-- 🚫 **Zero dependencies** — pure Python 3.11+ standard library; `pytest` needed only for the test suite
+- 🚫 **Zero dependencies** — pure Python 3.11+ standard library (config parsing uses stdlib `tomllib`); `pytest` needed only for the test suite
 - 🔒 **Never executes scanned code** — pure AST analysis, safe to run on untrusted or hostile repos
 - 🎯 **Actionable findings** — every finding ships with a concrete, copy-adaptable fix
 - 🧮 **Weighted 0–100 score** — one number a team can put a threshold on
 - 🤖 **CI-native** — `--min-score 70` fails the build; exit code `2` guards against the "scanned zero files, passed anyway" trap
-- 📦 **JSON output** — pipe reports into dashboards, bots, or PR comments
+- 📦 **JSON or SARIF output** — pipe reports into dashboards, bots, PR comments, or GitHub/GitLab code scanning
+- ⚙️ **Configurable, never overridable** — `[tool.agentgauge]` in pyproject.toml adds project vocabulary, excludes, and disables categories; it can never make a rule stop recognizing its built-in defaults
+- 🙈 **Inline suppression** — `# agentgauge: ignore[rule-id]` for incremental adoption, without ever weakening `FAIL_CRITICAL`
 - 🐕 **Dogfooded** — agentgauge's own CI gates every push with agentgauge
 
 ## 🏗️ Architecture
 
 ```mermaid
 flowchart LR
+    CFG[config.py<br/>tool.agentgauge loader] --> SC
     CLI[cli.py<br/>argparse, output, exit codes] --> SC[scanner.py<br/>file walk + encoding-safe parse]
-    SC -->|AST per file| CTX[RuleContext<br/>parent map, dotted names,<br/>sensitive-call tables]
+    CLI --> CFG
+    SC -->|AST per file| CTX[FileContext<br/>parent map, import aliases,<br/>sensitive-call tables, config, suppressions]
     CTX --> R1[rules/oversight]
     CTX --> R2[rules/audit]
     CTX --> R3[rules/ratelimit]
     CTX --> R4[rules/errorhandling]
     CTX --> R5[rules/validation]
     CTX --> R6[rules/defaults]
-    R1 & R2 & R3 & R4 & R5 & R6 --> AG[scoring.py<br/>cross-file aggregation]
-    AG --> REP[ScanReport<br/>human / JSON render]
+    R1 & R2 & R3 & R4 & R5 & R6 --> AG[scoring.py<br/>cross-file aggregation + suppression]
+    AG --> REP[ScanReport]
+    REP --> OUT1[human / JSON render]
+    REP --> OUT2[sarif.py<br/>SARIF 2.1.0 render]
 ```
 
 Design decisions that matter:
 
-- **Each rule is a plug-in** exposing `RULE_ID`, `CATEGORY`, `WEIGHT`, and `check(ctx) → (sites, passed, findings)`. Adding a seventh category means adding one file and registering it — nothing else changes.
-- **Shared AST plumbing lives in one place** ([astutils.py](agentgauge/astutils.py)): parent maps for "is there an approval check *in scope*?", dotted-name resolution for `subprocess.run` vs bare `run`, and the sensitive-call vocabulary tables.
-- **Scoring semantics live in the models**, not the rules — rules report facts; [models.py](agentgauge/models.py) turns facts into numbers.
-- **Performance:** single-pass AST walk per file, no I/O beyond reading sources. The full 74-test suite — including end-to-end scans — runs in **under half a second**.
+- **Each rule is a plug-in** exposing `RULE_ID`, `CATEGORY`, `WEIGHT`, and `check(ctx) → (sites, passed, findings)`. Adding a seventh category means adding one file and registering it — nothing else changes. Config-driven vocabulary and import-alias resolution were both added as **optional parameters with backward-compatible defaults** on the existing `astutils.py` primitives, so this contract never broke for existing rules or third-party ones written against it.
+- **Shared AST plumbing lives in one place** ([astutils.py](agentgauge/astutils.py)): parent maps for "is there an approval check *in scope*?", dotted-name resolution for `subprocess.run` vs bare `run` (alias-aware), the sensitive-call vocabulary tables, and inline suppression-comment parsing.
+- **Scoring semantics live in the models**, not the rules — rules report facts; [models.py](agentgauge/models.py) turns facts into numbers. Suppression and disabled-rule handling live in [scoring.py](agentgauge/scoring.py) as a scan-wide concern, not duplicated into every rule.
+- **Output rendering is decoupled from scoring** — [sarif.py](agentgauge/sarif.py) renders a `ScanReport` as SARIF without `scoring.py` knowing SARIF exists, the same way the CLI's `--json` path already worked.
+- **Performance:** single-pass AST walk per file, no I/O beyond reading sources. The full 160-test suite — including end-to-end scans — runs in **under one second**.
 
 ## ⚙️ Tech Stack
 
@@ -114,8 +121,9 @@ Design decisions that matter:
 |---|---|
 | 🐍 Language | Python 3.11+ (3.11 / 3.12 / 3.13 tested in CI) |
 | 🌳 Analysis | `ast` standard-library module — pure static parsing |
-| 🖥️ CLI | `argparse`, human + `--json` renderers |
-| ✅ Testing | `pytest` — 74 unit, per-rule, and integration tests |
+| ⚙️ Config | `tomllib` standard-library module — `[tool.agentgauge]` in pyproject.toml |
+| 🖥️ CLI | `argparse`, human + `--json` + `--sarif` renderers |
+| ✅ Testing | `pytest` — 160 unit, per-rule, and integration tests |
 | 🔁 CI/CD | GitHub Actions, 3-version matrix + self-scan gate |
 | 📦 Runtime deps | **None.** |
 
@@ -133,7 +141,7 @@ Exit codes (the CI contract):
 |---|---|
 | `0` | scan completed, met `--min-score` (if given), and verdict is not `FAIL_CRITICAL` |
 | `1` | score below `--min-score`, **or** verdict is `FAIL_CRITICAL` — a single ungated critical action fails the build regardless of `--min-score` or how high the score is |
-| `2` | bad invocation: target missing, or **zero Python files scanned** — a score over zero evidence is never reported as a pass |
+| `2` | bad invocation: target missing, **zero Python files scanned**, or a malformed `[tool.agentgauge]` config — a score over zero evidence, or over a config agentgauge couldn't understand, is never reported as a pass |
 
 ## 🛠️ Installation & Setup
 
@@ -161,10 +169,38 @@ $ python -m pytest tests/
 $ agentgauge path/to/repo                  # scan a whole repo
 $ agentgauge path/to/server.py             # or a single file
 $ agentgauge path/to/repo --json           # machine-readable report
+$ agentgauge path/to/repo --sarif          # SARIF 2.1.0, for code-scanning dashboards
 $ agentgauge path/to/repo --min-score 70   # CI gate: exit 1 below 70
+$ agentgauge path/to/repo --config custom.toml  # explicit config instead of discovery
 ```
 
 (`python -m agentgauge` works identically if you prefer module invocation.)
+
+### ⚙️ Configuration
+
+Drop a `[tool.agentgauge]` table in `pyproject.toml` next to the scan
+target to tune vocabulary, excludes, and per-rule behavior without forking
+source — a scan with no config file behaves identically to one with an
+empty table:
+
+```toml
+[tool.agentgauge]
+min_score = 80
+exclude = ["tests/fixtures/*"]
+disabled_rules = ["rate-limiting"]     # category removed; max score drops below 100
+assume_external_rate_limiting = false  # true if a gateway already rate-limits
+extra_approval_markers = ["vet", "greenlight"]
+extra_log_tokens = ["telemetry"]
+```
+
+Full key reference, defaults, and precedence rules (`--min-score` beats
+config; `--config` beats discovery) are in [RULES.md](RULES.md#configuration).
+
+Findings can also be suppressed inline for incremental adoption —
+`# agentgauge: ignore[human-oversight]` on the offending line — but a
+suppressed finding on a critical sink still forces `FAIL_CRITICAL`; see
+[RULES.md](RULES.md#suppressing-individual-findings) for why that's a hard
+rule, not an oversight.
 
 As a GitHub Actions gate in any project:
 
@@ -179,7 +215,7 @@ As a GitHub Actions gate in any project:
 
 ## 📈 Results & Validation
 
-- ✅ **74 tests, 100% passing, < 0.5 s** — unit tests per module, per-rule tests, and end-to-end integration scans
+- ✅ **160 tests, 100% passing, < 1 s** — unit tests per module, per-rule tests, and end-to-end integration scans
 - 🎯 **Calibrated end to end** — a deliberately vulnerable fixture server scores exactly **0.0/100** (16 findings); a deliberately hardened one scores exactly **100.0/100**. The full score range is provably exercised, not theoretical.
 - 🐕 **Dogfooded in CI** — every push must pass `agentgauge --min-score 100` on the clean fixture across Python 3.11, 3.12, and 3.13
 - 🔍 **16 distinct finding types** demonstrated on the vulnerable fixture, each with a concrete fix
@@ -192,16 +228,21 @@ Real problems this project had to solve — documented with their remaining limi
 - **A `try` body is not its handler.** Naively checking "is this call inside a `try`?" passes calls that live in the `except` block. The error-handling rule walks the AST to tell the protected region apart from the recovery region.
 - **Heuristics must confess.** Vocabulary-based checks can be fooled — an unused `approved = request_approval()` variable passes the oversight check today. Instead of hiding that, RULES.md documents every known false pass/false fail and the planned fix. *Trust is a feature.*
 - **Never score zero evidence.** An early design scored an empty scan as 100/100. The exit-code contract now treats "zero files scanned" as an invocation error — a governance tool must not hand out passing grades for silence.
+- **A suppression is not an amnesty.** Adding `# agentgauge: ignore` for incremental adoption almost reopened issue #1 through the back door — a one-line comment could silently flip `FAIL_CRITICAL` to `PASS` on an unguarded payment call, the exact dilution the verdict model exists to prevent. `critical_suppressed` closes that: suppressing a critical finding still trips the gate, it just does so quietly enough to declutter the report while loudly enough to never look like a clean pass.
 
 ## 🚀 Future Improvements
 
+- [x] **Configurable vocabularies** — custom approval / logging / rate-limit / validation / flag-name keyword lists via `[tool.agentgauge]`
+- [x] **Type-annotation evidence** — `Literal[...]` and `Annotated[..., Field(...)]` now count as validation proof
+- [x] **Import-alias resolution** — sees through `import subprocess as sp; sp.run(...)` and `from x import y as z`
+- [x] **`assume_external_rate_limiting`** — for deployments fronted by an API gateway
+- [x] **Inline suppression** — `# agentgauge: ignore[rule-id]` for incremental adoption, without weakening `FAIL_CRITICAL`
+- [x] **SARIF output** — `--sarif` for GitHub/GitLab code-scanning ingestion
 - [ ] **Enforcing-position analysis** — require approval vocabulary to actually gate execution (kills the dead-variable false pass without full data-flow analysis)
 - [ ] **Publish to PyPI** — plain `pip install agentgauge`, no git URL needed
-- [ ] **Configurable vocabularies** — custom approval / logging / rate-limit / flag-name keyword lists
-- [ ] **Type-annotation evidence** — read `Literal` and Pydantic `Field` constraints as validation proof
 - [ ] **Config-file scanning** — catch permissive defaults living in `claude_desktop_config.json`, `mcp.json`, …
-- [ ] **Import-alias resolution** — see through `import subprocess as sp; sp.run(...)`
-- [ ] **`assume_external_rate_limiting`** — for deployments fronted by an API gateway
+- [ ] **Plugin/entry-point rule system** — third-party rules without forking source
+- [ ] **New OWASP categories** — secrets/credential exposure, SSRF, excessive tool scope (would rebalance the 100-point weight model)
 
 ## 🤝 Contributing
 
