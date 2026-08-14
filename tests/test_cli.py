@@ -1,5 +1,7 @@
 import json
 
+import pytest
+
 from agentgauge.cli import main
 
 
@@ -89,3 +91,77 @@ def test_all_files_unparseable_returns_two(tmp_path, capsys):
     assert code == 2
     assert "skipped" in err
     assert "no Python files" in err
+
+
+def test_sarif_output_is_parseable(tmp_path, capsys):
+    (tmp_path / "flags.py").write_text("auto_approve = True\n")
+
+    code = main([str(tmp_path), "--sarif"])
+
+    data = json.loads(capsys.readouterr().out)
+    assert code == 0
+    assert data["version"] == "2.1.0"
+    assert data["runs"][0]["results"][0]["ruleId"] == "permissive-defaults"
+
+
+def test_json_and_sarif_are_mutually_exclusive(tmp_path, capsys):
+    # argparse itself rejects the combination before main() gets to run --
+    # it exits via SystemExit(2), the same as any other malformed invocation.
+    (tmp_path / "flags.py").write_text("auto_approve = True\n")
+
+    with pytest.raises(SystemExit) as exc_info:
+        main([str(tmp_path), "--json", "--sarif"])
+
+    assert exc_info.value.code == 2
+    assert "not allowed with" in capsys.readouterr().err
+
+
+def test_min_score_from_config_file_gates_without_a_cli_flag(tmp_path, capsys):
+    (tmp_path / "pyproject.toml").write_text("[tool.agentgauge]\nmin_score = 95\n")
+    (tmp_path / "flags.py").write_text("auto_approve = True\n")
+
+    code = main([str(tmp_path)])
+
+    assert code == 1  # 90.0 scored, below the config's min_score of 95
+
+
+def test_cli_min_score_flag_overrides_config_file(tmp_path, capsys):
+    (tmp_path / "pyproject.toml").write_text("[tool.agentgauge]\nmin_score = 95\n")
+    (tmp_path / "flags.py").write_text("auto_approve = True\n")
+
+    code = main([str(tmp_path), "--min-score", "50"])
+
+    assert code == 0  # CLI flag (50) wins over the config file's 95
+
+
+def test_explicit_config_flag_is_used_instead_of_discovery(tmp_path, capsys):
+    (tmp_path / "flags.py").write_text("auto_approve = True\n")
+    custom = tmp_path / "custom.toml"
+    custom.write_text("[tool.agentgauge]\nmin_score = 50\n")
+
+    code = main([str(tmp_path), "--config", str(custom)])
+
+    assert code == 0
+
+
+def test_malformed_config_file_returns_two(tmp_path, capsys):
+    (tmp_path / "pyproject.toml").write_text("[tool.agentgauge\nmin_score = 1\n")
+    (tmp_path / "flags.py").write_text("auto_approve = True\n")
+
+    code = main([str(tmp_path)])
+
+    assert code == 2
+    assert "pyproject.toml" in capsys.readouterr().err
+
+
+def test_inline_suppression_is_reflected_in_output(tmp_path, capsys):
+    (tmp_path / "flags.py").write_text(
+        "auto_approve = True  # agentgauge: ignore\n"
+    )
+
+    code = main([str(tmp_path)])
+
+    out = capsys.readouterr().out
+    assert code == 0
+    assert "100.0 / 100" in out
+    assert "1 finding(s) suppressed" in out
