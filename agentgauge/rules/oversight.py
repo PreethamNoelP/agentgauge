@@ -8,6 +8,10 @@ to or passed as a keyword, which would count a dead variable no one
 checks. Position-based, not flow-based: we don't trace where a tested
 value's truthiness ultimately comes from (e.g. a hardcoded
 `approved = True` feeding a real `if approved:` still passes).
+
+"Scope" means the *same* execution scope (see astutils.iter_scope), not
+the whole subtree. A check written inside some other function in the file
+does not run when a module-level call executes, so it must not satisfy it.
 """
 
 import ast
@@ -19,6 +23,7 @@ from agentgauge.astutils import (
     enclosing_function,
     is_critical,
     iter_identifiers,
+    iter_scope,
     iter_sensitive_calls,
 )
 from agentgauge.models import Finding
@@ -42,10 +47,12 @@ def _decorator_name(dec: ast.expr) -> str | None:
     return dotted_name(target)
 
 
-def _has_approval_signal(scope: ast.AST, extra_markers: tuple[str, ...]) -> bool:
-    for node in ast.walk(scope):
+def _has_approval_signal(
+    scope: ast.AST, extra_markers: tuple[str, ...], aliases: dict[str, str]
+) -> bool:
+    for node in iter_scope(scope):
         if isinstance(node, ast.Call):
-            name = call_name(node)
+            name = call_name(node, aliases)
             if name is not None and _mentions_marker(name, extra_markers):
                 return True
         elif isinstance(node, (ast.If, ast.While)):
@@ -54,22 +61,34 @@ def _has_approval_signal(scope: ast.AST, extra_markers: tuple[str, ...]) -> bool
         elif isinstance(node, ast.Assert):
             if any(_mentions_marker(i, extra_markers) for i in iter_identifiers(node.test)):
                 return True
-        elif isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
-            for dec in node.decorator_list:
-                name = _decorator_name(dec)
-                if name is not None and _mentions_marker(name, extra_markers):
-                    return True
+    # iter_scope does not descend into nested defs, so the only FunctionDef
+    # it yields is `scope` itself -- this branch reads that function's own
+    # decorators (@requires_approval), which do gate it.
+    if isinstance(scope, (ast.FunctionDef, ast.AsyncFunctionDef)):
+        for dec in scope.decorator_list:
+            name = _decorator_name(dec)
+            if name is not None and _mentions_marker(name, extra_markers):
+                return True
     return False
 
 
 def check(ctx: FileContext) -> tuple[int, int, list[Finding]]:
     sites, passed, findings = 0, 0, []
     extra_markers = ctx.config.approval_markers
+    # One scope answers identically for every sensitive call it contains, and
+    # a single function can hold hundreds of them -- without this cache the
+    # rule re-walks the whole scope per call, which is quadratic (a 800-call
+    # module took ~6s before, ~0.05s after).
+    signal_cache: dict[int, bool] = {}
     for call, label in iter_sensitive_calls(ctx.tree, ctx.import_aliases):
         sites += 1
         fn = enclosing_function(call, ctx.parents)
         scope = fn if fn is not None else ctx.tree
-        if _has_approval_signal(scope, extra_markers):
+        has_signal = signal_cache.get(id(scope))
+        if has_signal is None:
+            has_signal = _has_approval_signal(scope, extra_markers, ctx.import_aliases)
+            signal_cache[id(scope)] = has_signal
+        if has_signal:
             passed += 1
             continue
         where = f"in '{fn.name}'" if fn is not None else "at module level"

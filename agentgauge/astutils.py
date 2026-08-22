@@ -238,6 +238,30 @@ def build_import_aliases(tree: ast.AST) -> dict[str, str]:
     return aliases
 
 
+def iter_scope(scope: ast.AST):
+    """Yield `scope` and every descendant that executes in the *same* scope.
+
+    Nested def/async def bodies are separate scopes and are not entered: a
+    check written inside a helper function does not run when the code around
+    that helper does. This is what makes "is there an approval check in
+    scope?" answerable without confusing a call at module level with an
+    unrelated function that happens to live in the same file.
+
+    Class bodies *are* entered -- `class C: os.system(x)` executes at
+    definition time in the surrounding scope, so its statements belong to it.
+    Lambdas are entered too: a lambda body is an expression evaluated where
+    it is written.
+    """
+    yield scope
+    queue = list(ast.iter_child_nodes(scope))
+    while queue:
+        node = queue.pop(0)
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            continue
+        yield node
+        queue.extend(ast.iter_child_nodes(node))
+
+
 def enclosing_function(
     node: ast.AST, parents: dict[ast.AST, ast.AST]
 ) -> FunctionNode | None:

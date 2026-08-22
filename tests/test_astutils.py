@@ -8,6 +8,7 @@ from agentgauge.astutils import (
     dotted_name,
     enclosing_function,
     is_critical,
+    iter_scope,
     iter_sensitive_calls,
     sensitive_label,
 )
@@ -284,3 +285,22 @@ def test_dynamic_receiver_fallback_stays_suffix_only():
     # The fallback must not promote a generic method name; only the
     # distinctive suffix table applies.
     assert sensitive_label(first_call("get_db().delete(row)")) is None
+
+
+# --- scope boundaries ---
+
+def test_iter_scope_does_not_enter_nested_functions():
+    tree = ast.parse(
+        "x = 1\n"
+        "def helper():\n"
+        "    y = 2\n"
+        "class C:\n"
+        "    z = 3\n"
+    )
+    names = {n.id for n in iter_scope(tree) if isinstance(n, ast.Name)}
+    assert names == {"x", "z"}  # y lives in helper's own scope
+
+
+def test_iter_scope_of_a_function_yields_the_function_itself():
+    fn = ast.parse("def f():\n    pass\n").body[0]
+    assert next(iter_scope(fn)) is fn
