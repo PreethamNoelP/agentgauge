@@ -123,7 +123,7 @@ Design decisions that matter:
 | 🌳 Analysis | `ast` + `tokenize` standard-library modules — pure static parsing |
 | ⚙️ Config | `tomllib` standard-library module — `[tool.agentgauge]` in pyproject.toml |
 | 🖥️ CLI | `argparse`, human + `--json` + `--sarif` renderers |
-| ✅ Testing | `pytest` — 878 unit, per-rule, invariant, and integration tests |
+| ✅ Testing | `pytest` — 880+ unit, per-rule, invariant, and integration tests |
 | 🔁 CI/CD | GitHub Actions, 6-entry matrix + four dogfood gates |
 | 📦 Runtime deps | **None.** |
 
@@ -237,7 +237,7 @@ Or into GitHub code scanning:
 
 ## 📈 Results & Validation
 
-- ✅ **878 tests, 100% passing, < 2 s** — per-module, per-rule, invariant/property, and end-to-end integration
+- ✅ **880+ tests, 100% passing, < 2 s** — per-module, per-rule, invariant/property, and end-to-end integration
 - 🎯 **Calibrated end to end** — a deliberately vulnerable fixture scores exactly **0.0/100** (44 findings across all six categories); a deliberately hardened one scores exactly **100.0/100** with every category having at least one site. Both ends of the range are pinned, not theoretical.
 - 🧪 **Property tests, not just examples** — `sites == passed + findings` for every rule over a 45-snippet corpus (match statements, `except*`, walrus, unicode identifiers, async comprehensions), score bounds, byte-identical output across repeated runs, and a pinned JSON key contract
 - 🐕 **Four dogfood gates in CI** — own source scores 100 with a complete scan; the clean fixture is not a false positive; **the vulnerable fixture still fails** (the gate that catches a silent detection regression); JSON and SARIF parse and a hostile repo doesn't crash the scan
