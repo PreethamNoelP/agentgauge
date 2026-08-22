@@ -1,9 +1,11 @@
 from pathlib import Path
 
+import pytest
+
 import agentgauge.scanner as scanner_module
 from agentgauge.astutils import FileContext
 from agentgauge.config import Config, RuleConfig
-from agentgauge.scanner import iter_python_files, scan
+from agentgauge.scanner import escapes_scan_root, iter_python_files, scan
 
 
 def test_scan_walks_directory_and_skips_junk_dirs(tmp_path):
@@ -281,3 +283,144 @@ def test_skip_reason_does_not_leak_an_absolute_path(tmp_path, monkeypatch):
 
     entry = next(e for e in report.skipped if e.startswith("enc.py"))
     assert str(tmp_path) not in entry
+
+
+# --- symlinks: a scanned repo must not be able to redirect us out of it ---
+
+def _can_symlink(tmp_path) -> bool:
+    """Symlink creation needs elevated privileges on Windows, so these tests
+    verify on POSIX (and on the Linux half of the CI matrix) and skip
+    elsewhere rather than silently passing."""
+    try:
+        (tmp_path / "_probe_target").write_text("x = 1\n")
+        (tmp_path / "_probe_link").symlink_to(tmp_path / "_probe_target")
+    except (OSError, NotImplementedError):
+        return False
+    (tmp_path / "_probe_link").unlink()
+    (tmp_path / "_probe_target").unlink()
+    return True
+
+
+def test_symlink_out_of_the_tree_is_refused_and_reported(tmp_path):
+    if not _can_symlink(tmp_path):
+        pytest.skip("this platform does not allow creating symlinks")
+
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    (outside / "private.py").write_text("import os\ndef f(p):\n    os.remove(p)\n")
+    root = tmp_path / "repo"
+    root.mkdir()
+    (root / "real.py").write_text("auto_approve = True\n")
+    (root / "config.py").symlink_to(outside / "private.py")
+
+    report = scan(root)
+
+    assert report.files_scanned == 1
+    assert any("symlink not followed" in entry for entry in report.skipped)
+    # The refusal is visible, not silent: a file we declined to read is a
+    # hole in coverage.
+    assert report.verdict == "INCOMPLETE"
+    assert not any("os.remove" in f.message for f in report.findings)
+
+
+def test_symlink_inside_the_tree_is_followed(tmp_path):
+    if not _can_symlink(tmp_path):
+        pytest.skip("this platform does not allow creating symlinks")
+
+    root = tmp_path / "repo"
+    (root / "shared").mkdir(parents=True)
+    (root / "shared" / "util.py").write_text(
+        "import shutil\ndef wipe(p):\n    shutil.rmtree(p)\n"
+    )
+    (root / "pkg").mkdir()
+    (root / "pkg" / "util.py").symlink_to(root / "shared" / "util.py")
+
+    report = scan(root)
+
+    # Both the real file and the in-tree link are ordinary repo layout.
+    assert report.files_scanned == 2
+    assert report.skipped == []
+    assert report.verdict == "FAIL_CRITICAL"
+
+
+def test_broken_symlink_is_refused_not_fatal(tmp_path):
+    if not _can_symlink(tmp_path):
+        pytest.skip("this platform does not allow creating symlinks")
+
+    root = tmp_path / "repo"
+    root.mkdir()
+    (root / "ok.py").write_text("x = 1\n")
+    (root / "dangling.py").symlink_to(tmp_path / "does_not_exist.py")
+
+    report = scan(root)
+
+    assert report.files_scanned == 1
+    assert any("dangling.py" in entry for entry in report.skipped)
+
+
+def test_explicitly_named_symlink_target_is_still_scanned(tmp_path):
+    # Exclude patterns don't overrule an explicit target, and neither does
+    # this: pointing agentgauge at a link is the caller's own decision.
+    if not _can_symlink(tmp_path):
+        pytest.skip("this platform does not allow creating symlinks")
+
+    real = tmp_path / "real.py"
+    real.write_text("auto_approve = True\n")
+    link = tmp_path / "link.py"
+    link.symlink_to(real)
+
+    report = scan(link)
+
+    assert report.files_scanned == 1
+    assert report.findings[0].rule == "permissive-defaults"
+
+
+def test_escapes_scan_root_is_false_for_ordinary_files(tmp_path):
+    # Platform-independent: no symlink needed, so this runs everywhere and
+    # pins the "don't penalize normal files" half of the contract.
+    (tmp_path / "plain.py").write_text("x = 1\n")
+
+    assert escapes_scan_root(tmp_path / "plain.py", tmp_path) is False
+
+
+class _FakeLink:
+    """Minimal stand-in for a Path, so the decision logic in
+    escapes_scan_root can be pinned on platforms that cannot create real
+    symlinks. The POSIX tests above exercise the same branches against the
+    real filesystem in CI; this one runs everywhere."""
+
+    def __init__(self, resolved, *, symlink=True):
+        self._resolved = resolved
+        self._symlink = symlink
+
+    def is_symlink(self):
+        return self._symlink
+
+    def resolve(self, strict=False):
+        if isinstance(self._resolved, Exception):
+            raise self._resolved
+        return self._resolved
+
+
+def test_escapes_scan_root_allows_a_link_resolving_inside(tmp_path):
+    inside = _FakeLink(tmp_path / "pkg" / "util.py")
+    assert escapes_scan_root(inside, tmp_path) is False
+
+
+def test_escapes_scan_root_refuses_a_link_resolving_outside(tmp_path):
+    outside = _FakeLink(Path("/etc/passwd").absolute())
+    assert escapes_scan_root(outside, tmp_path) is True
+
+
+def test_escapes_scan_root_refuses_an_unresolvable_link(tmp_path):
+    # A loop (OSError/ELOOP) or a dangling target: "cannot prove it stays
+    # inside" gets the same answer as "leaves".
+    for error in (OSError("ELOOP"), FileNotFoundError(), RuntimeError()):
+        assert escapes_scan_root(_FakeLink(error), tmp_path) is True
+
+
+def test_escapes_scan_root_ignores_non_symlinks_without_resolving(tmp_path):
+    # A plain file must short-circuit before any resolve() call -- that is
+    # what keeps the check off the hot path for every ordinary file.
+    plain = _FakeLink(OSError("resolve must not be called"), symlink=False)
+    assert escapes_scan_root(plain, tmp_path) is False

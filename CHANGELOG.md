@@ -69,7 +69,15 @@ explicitly.
 - Sources with NUL bytes, unknown PEP 263 encodings, or a size past
   `MAX_FILE_BYTES` (5 MB) are skipped rather than ending the scan.
 - Skip reasons no longer embed absolute paths, so the same commit produces
-  the same report on every machine.
+  the same report on every machine. Neither does the reported config source:
+  `config_source` in JSON and in the SARIF invocation, and every
+  `ConfigError` message, now name the file relative to the working directory
+  when it is under it.
+- Symlinks pointing outside the scan root are no longer followed. A scanned
+  repository is untrusted, and a `*.py` file that is really a link to
+  `~/.aws/credentials` should not be read. In-tree symlinks are still
+  followed; a refusal is reported, so it shows up as `INCOMPLETE` rather
+  than as silently reduced coverage.
 
 ### Added
 
@@ -88,6 +96,9 @@ explicitly.
   skipped files and scan warnings, which a results-only view dropped
   entirely.
 - `py.typed` marker, for third-party rules written against `FileContext`.
+- `.github/dependabot.yml`, and CI actions pinned to commit SHAs rather than
+  movable major tags, with `permissions: contents: read` declared at the top
+  of the workflow instead of inherited from a repository setting.
 
 ### Changed
 

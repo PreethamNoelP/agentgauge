@@ -345,6 +345,15 @@ server usually spells its settings.
 - Files larger than `scanner.MAX_FILE_BYTES` (5 MB). `ast.parse` builds a
   tree many times the size of its source, and this tool runs on untrusted
   repositories; no hand-written module comes close to the limit.
+- Symlinks whose target lies outside the scan root, or that cannot be
+  resolved at all (a loop, a dangling target). A scanned repository is
+  untrusted input, and a file named `config.py` that is really a link to
+  `~/.aws/credentials` should not be read just because it matched `*.py`.
+  Symlinks that stay *inside* the root are followed normally — a shared
+  module linked into a package is ordinary repository layout. Symlinked
+  *directories* were never traversed: pathlib's `**` does not descend into
+  them, so a link cannot redirect the walk itself. An explicitly named
+  target is always scanned, the same way exclude patterns don't overrule it.
 
 Nothing under the target is ever imported, executed, or evaluated —
 `ast.parse` and `tokenize` only.

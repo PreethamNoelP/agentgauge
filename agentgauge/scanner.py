@@ -101,6 +101,38 @@ def iter_python_files(root: Path, exclude: tuple[str, ...] = ()):
         yield path
 
 
+def escapes_scan_root(path: Path, root: Path) -> bool:
+    """True if `path` is a symlink whose target lies outside `root`.
+
+    Scanned repositories are untrusted. A file named `config.py` that is
+    really a link to ~/.aws/credentials would otherwise be read and parsed,
+    and while agentgauge never executes what it reads and never reports
+    string values, identifier names from a file outside the tree could
+    surface in the report under an in-tree path. Refusing to follow the link
+    removes the question.
+
+    Symlinks that stay *inside* the scan root are followed normally -- they
+    are ordinary repository layout (a shared module linked into a package),
+    and skipping them would silently shrink coverage.
+
+    Only files are checked: pathlib's `**` does not descend into symlinked
+    directories, so a link cannot redirect the walk itself.
+
+    An unresolvable link -- a loop, or a target on a filesystem that errors
+    -- counts as escaping. "Cannot prove it stays inside" is the same answer
+    as "leaves" for this purpose.
+    """
+    if not path.is_symlink():
+        return False
+    try:
+        # Both sides resolved, so a checkout that itself lives under a
+        # symlink (/tmp -> /private/tmp on macOS) compares consistently.
+        path.resolve(strict=True).relative_to(root.resolve())
+    except (ValueError, OSError, RuntimeError):
+        return True
+    return False
+
+
 def _display_path(path: Path, root: Path, cwd: Path) -> str:
     """The path agentgauge reports for a finding.
 
@@ -163,6 +195,19 @@ def scan(target: str | Path, config: Config | None = None) -> ScanReport:
                 # report differ between machines for the same commit. The
                 # entry already names the file relatively.
                 skipped.append(f"{rel}: {_relativize(reason, path, rel)}")
+
+            # Checked here rather than in iter_python_files so the refusal is
+            # reported rather than silent: a file we declined to read is a
+            # hole in coverage, which is exactly what INCOMPLETE is for.
+            # An explicitly named target is the caller's own choice and is
+            # never second-guessed, the same way exclude patterns aren't
+            # allowed to overrule it.
+            if not root.is_file() and escapes_scan_root(path, root):
+                note(
+                    "symlink not followed (target is outside the scan root, "
+                    "or could not be resolved)"
+                )
+                continue
 
             try:
                 ctx = FileContext.from_source(
