@@ -299,26 +299,36 @@ def enclosing_function(
     return None
 
 
-# Matches "# agentgauge: ignore" (suppresses every rule on that line) or
-# "# agentgauge: ignore[human-oversight, audit-logging]" (suppresses only the
-# named rules) -- the same shape as flake8's "# noqa" / bandit's "# nosec".
-#
-# The bracket group captures anything up to "]" rather than only well-formed
-# rule ids on purpose. An earlier pattern accepted only [\w, -]+ inside the
-# brackets, which meant "ignore[]" and "ignore[typo!]" failed to match the
-# bracketed alternative, fell back to the bare "ignore" alternative, and
-# silently escalated a narrow (or empty) suppression into a blanket one.
-# Matching greedily and validating afterwards keeps a malformed marker
-# malformed. \b stops "ignored"/"ignoring" in prose from suppressing.
+"""Suppression marker patterns.
+
+Deliberately documented in a docstring rather than in `#` comments: this
+module is scanned by agentgauge like any other, and the tokenizer sees a
+real comment containing the marker followed by prose as a malformed
+directive -- correctly, since that is exactly the "brackets forgotten"
+shape the strictness exists to catch. Writing the examples in a string
+keeps the module's own self-scan clean. See RULES.md.
+
+_SUPPRESS_RE matches the directive in either form: bare (suppresses every
+rule on that line) or bracketed with a comma-separated rule list -- the
+same shape as flake8's "noqa" and bandit's "nosec".
+
+The bracket group captures anything up to "]" rather than only well-formed
+rule ids on purpose. An earlier pattern accepted only [\\w, -]+ inside the
+brackets, which meant an empty or invalid list failed to match the
+bracketed alternative, fell back to the bare alternative, and silently
+escalated a narrow suppression into a blanket one. Matching greedily and
+validating afterwards keeps a malformed marker malformed. The \\b stops
+"ignored"/"ignoring" in prose from being read as a directive.
+
+_REASON_RE gates the trailing text. A free-text reason may follow, but it
+has to announce itself with "--", ":" or "#". A bare directive followed by
+bare prose is malformed, not blanket: forgetting the brackets around a
+rule name must not suppress every rule on the line, including rules added
+in later versions.
+"""
 _SUPPRESS_RE = re.compile(
     r"#\s*agentgauge:\s*ignore\b[ \t]*(\[[^\]]*\])?[ \t]*(.*)$", re.IGNORECASE
 )
-
-# A free-text reason may follow the directive, but it has to announce
-# itself. Bare `ignore` followed by prose is a malformed directive, not a
-# blanket one: "# agentgauge: ignore rate-limiting" (brackets forgotten)
-# must not silently suppress every rule on the line, including rules added
-# in later versions.
 _REASON_RE = re.compile(r"^(--|:|#)")
 
 _MARKER_RE = re.compile(r"agentgauge", re.IGNORECASE)

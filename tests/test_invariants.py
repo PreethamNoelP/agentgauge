@@ -311,3 +311,24 @@ def test_package_never_opens_a_file_for_writing():
             assert not writes or devnull, (
                 f"{source.name}:{node.lineno} opens a file for writing ({modes})"
             )
+
+
+def test_agentgauge_scanning_itself_produces_no_warnings():
+    """The self-scan must be clean, not just high-scoring.
+
+    This caught a real wart: the suppression-marker documentation lived in
+    `#` comments, so agentgauge read its own explanation of the syntax as a
+    malformed directive and warned about it on every run. Correct behavior
+    from the rule, embarrassing output from the tool. A scanner whose own
+    source trips its own parser has no business lecturing anyone.
+    """
+    report = scan(PACKAGE)
+
+    # The one warning that IS expected here: the package has no sensitive
+    # calls, tool functions or governance flags of its own, so every category
+    # has zero sites. That note is the honest thing to say about a 100/100
+    # earned by having nothing to check -- see test_zero_applicable_sites.
+    unexpected = [w for w in report.warnings if "absence of anything" not in w]
+
+    assert unexpected == [], unexpected
+    assert report.skipped == []

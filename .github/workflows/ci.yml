@@ -48,6 +48,13 @@ jobs:
     # the shipped package is clean, the clean fixture is not a false
     # positive, the vulnerable fixture is still detected, and the
     # machine-readable outputs actually parse.
+    #
+    # Every gate that expects a NON-ZERO exit captures it with
+    # `&& code=0 || code=$?` and redirects to a file rather than a pipe.
+    # GitHub runs `run:` blocks under `bash -e`, so a bare
+    # `agentgauge ...; test $? -eq 1` aborts the step the instant agentgauge
+    # exits 1 -- on precisely the behavior the gate exists to assert.
+    # Avoiding pipes keeps these steps correct with or without `pipefail`.
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
@@ -64,35 +71,60 @@ jobs:
 
       - name: Vulnerable fixture is still detected
         # The regression gate that matters: if detection silently breaks,
-        # this exits 0 and the build must fail.
+        # agentgauge exits 0 here and the build must fail.
         run: |
-          if agentgauge tests/fixtures/vulnerable_server.py; then
-            echo "::error::vulnerable fixture no longer fails -- detection regressed"
+          agentgauge tests/fixtures/vulnerable_server.py && code=0 || code=$?
+          if [ "$code" -ne 1 ]; then
+            echo "::error::vulnerable fixture exited $code, expected 1 -- detection regressed"
             exit 1
           fi
-          agentgauge tests/fixtures/vulnerable_server.py --json \
-            | python -c "import json,sys; r=json.load(sys.stdin); \
-                assert r['verdict']=='FAIL_CRITICAL', r['verdict']; \
-                assert r['score']==0.0, r['score']"
+          agentgauge tests/fixtures/vulnerable_server.py --json > "$RUNNER_TEMP/vuln.json" && code=0 || code=$?
+          if [ "$code" -ne 1 ]; then
+            echo "::error::--json run exited $code, expected 1"
+            exit 1
+          fi
+          python - <<'PY'
+          import json, os
+          r = json.load(open(os.environ["RUNNER_TEMP"] + "/vuln.json"))
+          assert r["verdict"] == "FAIL_CRITICAL", r["verdict"]
+          assert r["score"] == 0.0, r["score"]
+          PY
 
       - name: JSON and SARIF output are well-formed
         run: |
-          agentgauge . --json | python -m json.tool > /dev/null
-          agentgauge . --sarif | python -c "import json,sys; \
-              d=json.load(sys.stdin); \
-              assert d['version']=='2.1.0'; \
-              assert d['runs'][0]['tool']['driver']['version']; \
-              assert 'invocations' in d['runs'][0]"
+          agentgauge . --json > "$RUNNER_TEMP/report.json"
+          agentgauge . --sarif > "$RUNNER_TEMP/report.sarif"
+          python - <<'PY'
+          import json, os
+          json.load(open(os.environ["RUNNER_TEMP"] + "/report.json"))
+          d = json.load(open(os.environ["RUNNER_TEMP"] + "/report.sarif"))
+          assert d["version"] == "2.1.0"
+          assert d["runs"][0]["tool"]["driver"]["version"]
+          assert "invocations" in d["runs"][0]
+          PY
 
       - name: Scanning a hostile repository does not crash
-        # Untrusted input is the normal case for this tool.
+        # Untrusted input is the normal case for this tool. The files are
+        # written from Python so the NUL byte and the bogus PEP 263 coding
+        # declaration are exact bytes, not shell-quoting guesswork.
         run: |
-          mkdir -p /tmp/hostile
-          printf 'def broken(:\n'            > /tmp/hostile/syntax.py
-          printf "x = '\x00'\n"              > /tmp/hostile/nul.py
-          printf '# -*- coding: nope -*-\n'  > /tmp/hostile/enc.py
-          printf 'import shutil\nshutil.rmtree(p)\n' > /tmp/hostile/real.py
-          agentgauge /tmp/hostile --json > /tmp/hostile.json; test $? -eq 1
-          python -c "import json; r=json.load(open('/tmp/hostile.json')); \
-              assert len(r['skipped'])==3, r['skipped']; \
-              assert r['verdict']=='FAIL_CRITICAL'"
+          python - <<'PY'
+          import os, pathlib
+          d = pathlib.Path(os.environ["RUNNER_TEMP"]) / "hostile"
+          d.mkdir(exist_ok=True)
+          (d / "syntax.py").write_text("def broken(:\n")
+          (d / "nul.py").write_bytes(b"x = '\x00'\n")
+          (d / "enc.py").write_bytes(b"# -*- coding: nope -*-\nx = 1\n")
+          (d / "real.py").write_text("import shutil\nshutil.rmtree(p)\n")
+          PY
+          agentgauge "$RUNNER_TEMP/hostile" --json > "$RUNNER_TEMP/hostile.json" && code=0 || code=$?
+          if [ "$code" -ne 1 ]; then
+            echo "::error::hostile scan exited $code, expected 1"
+            exit 1
+          fi
+          python - <<'PY'
+          import json, os
+          r = json.load(open(os.environ["RUNNER_TEMP"] + "/hostile.json"))
+          assert len(r["skipped"]) == 3, r["skipped"]
+          assert r["verdict"] == "FAIL_CRITICAL", r["verdict"]
+          PY
