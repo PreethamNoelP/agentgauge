@@ -127,6 +127,15 @@ def _display_path(path: Path, root: Path, cwd: Path) -> str:
         return path.as_posix()
 
 
+def _relativize(reason: str, path: Path, rel: str) -> str:
+    """Replace any spelling of the file's absolute path in an exception
+    message with the reported relative one, so the same commit produces the
+    same report on every machine."""
+    for spelling in {str(path), os.path.abspath(path)}:
+        reason = reason.replace(spelling, rel)
+    return reason
+
+
 def _read_source(path: Path) -> str:
     if path.stat().st_size > MAX_FILE_BYTES:
         raise ValueError(
@@ -147,23 +156,31 @@ def scan(target: str | Path, config: Config | None = None) -> ScanReport:
     def iter_contexts():
         for path in iter_python_files(root, config.exclude):
             rel = _display_path(path, root, cwd)
+
+            def note(reason: str) -> None:
+                # Some exception messages (notably "unknown encoding for
+                # <path>") embed the absolute path, which would make the
+                # report differ between machines for the same commit. The
+                # entry already names the file relatively.
+                skipped.append(f"{rel}: {_relativize(reason, path, rel)}")
+
             try:
                 ctx = FileContext.from_source(
                     _read_source(path), path=rel, config=config.rules
                 )
             except SyntaxError as exc:
                 where = f" at line {exc.lineno}" if exc.lineno else ""
-                skipped.append(f"{rel}: syntax error{where} ({exc.msg})")
+                note(f"syntax error{where} ({exc.msg})")
             except RecursionError:
-                skipped.append(f"{rel}: too deeply nested to parse")
+                note("too deeply nested to parse")
             except MemoryError:
-                skipped.append(f"{rel}: ran out of memory while parsing")
+                note("ran out of memory while parsing")
             # ValueError: source containing NUL bytes (and the size guard
             # above). LookupError: a PEP 263 declaration naming an encoding
             # this interpreter does not have. Both are reachable from any
             # untrusted repository and neither should end the scan.
             except (OSError, UnicodeDecodeError, ValueError, LookupError) as exc:
-                skipped.append(f"{rel}: unreadable ({exc})")
+                note(f"unreadable ({exc})")
             else:
                 yield ctx
 

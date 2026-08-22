@@ -268,3 +268,16 @@ def test_target_outside_the_working_directory_falls_back_to_root_relative(
     report = scan(other)
 
     assert report.findings[0].file == "pkg/server.py"
+
+
+def test_skip_reason_does_not_leak_an_absolute_path(tmp_path, monkeypatch):
+    # "unknown encoding for <abs path>" would make the same commit produce
+    # a different report on every machine, which breaks log diffing.
+    (tmp_path / "enc.py").write_bytes(b"# -*- coding: nope -*-\nx = 1\n")
+    (tmp_path / "ok.py").write_text("x = 1\n")
+    monkeypatch.chdir(tmp_path)
+
+    report = scan(Path("."))
+
+    entry = next(e for e in report.skipped if e.startswith("enc.py"))
+    assert str(tmp_path) not in entry

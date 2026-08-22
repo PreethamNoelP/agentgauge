@@ -1,5 +1,5 @@
 [build-system]
-requires = ["setuptools>=68"]
+requires = ["setuptools>=77"]
 build-backend = "setuptools.build_meta"
 
 [project]
@@ -8,7 +8,8 @@ dynamic = ["version"]
 description = "Static governance scanner for MCP servers and AI agent tool-calling code — a linter for the OWASP Agentic Top 10."
 readme = "README.md"
 requires-python = ">=3.11"
-license = { text = "MIT" }
+license = "MIT"
+license-files = ["LICENSE"]
 authors = [{ name = "Preetham Noel P" }]
 keywords = [
     "mcp",
@@ -23,7 +24,6 @@ classifiers = [
     "Development Status :: 4 - Beta",
     "Environment :: Console",
     "Intended Audience :: Developers",
-    "License :: OSI Approved :: MIT License",
     "Operating System :: OS Independent",
     "Programming Language :: Python :: 3",
     "Programming Language :: Python :: 3.11",
@@ -33,9 +33,16 @@ classifiers = [
     "Topic :: Software Development :: Quality Assurance",
 ]
 
+[project.optional-dependencies]
+# The scanner itself has no runtime dependencies; this is only for
+# `pip install -e .[dev]` when working on agentgauge.
+dev = ["pytest>=7"]
+
 [project.urls]
 Homepage = "https://github.com/PreethamNoelP/agentgauge"
 Issues = "https://github.com/PreethamNoelP/agentgauge/issues"
+Changelog = "https://github.com/PreethamNoelP/agentgauge/blob/main/CHANGELOG.md"
+Documentation = "https://github.com/PreethamNoelP/agentgauge/blob/main/RULES.md"
 
 [project.scripts]
 agentgauge = "agentgauge.cli:main"
@@ -43,5 +50,18 @@ agentgauge = "agentgauge.cli:main"
 [tool.setuptools]
 packages = ["agentgauge", "agentgauge.rules"]
 
+[tool.setuptools.package-data]
+# PEP 561 marker: agentgauge is fully annotated, so a consumer writing a
+# third-party rule against FileContext gets real type checking.
+agentgauge = ["py.typed"]
+
 [tool.setuptools.dynamic]
 version = { attr = "agentgauge.__version__" }
+
+[tool.agentgauge]
+# agentgauge scans itself in CI. tests/ is excluded because its
+# subprocess.run() calls invoke the CLI under test -- that is a test
+# harness, not agent tool-calling code -- and tests/fixtures/ is
+# deliberately vulnerable by design. CI gates the fixtures separately:
+# the clean one must score 100, the vulnerable one must exit 1.
+exclude = ["tests/*"]

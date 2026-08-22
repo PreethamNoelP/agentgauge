@@ -7,9 +7,14 @@ on:
 
 jobs:
   test:
-    runs-on: ubuntu-latest
+    runs-on: ${{ matrix.os }}
     strategy:
+      fail-fast: false
       matrix:
+        # Windows is in the matrix on purpose: path handling, exclude-glob
+        # case sensitivity and encoding detection have all been
+        # platform-dependent bugs in this scanner before.
+        os: [ubuntu-latest, windows-latest]
         python-version: ["3.11", "3.12", "3.13"]
     steps:
       - uses: actions/checkout@v4
@@ -18,11 +23,62 @@ jobs:
         with:
           python-version: ${{ matrix.python-version }}
 
-      - name: Install test dependencies
-        run: pip install pytest
+      - name: Install
+        run: pip install -e ".[dev]"
 
       - name: Run test suite
-        run: python -m pytest tests/ -v
+        run: python -m pytest tests/ -q
 
-      - name: Dogfood — agentgauge gates its own CI
-        run: python -m agentgauge tests/fixtures/clean_server.py --min-score 100
+  dogfood:
+    # Four gates, each proving something a test suite alone does not:
+    # the shipped package is clean, the clean fixture is not a false
+    # positive, the vulnerable fixture is still detected, and the
+    # machine-readable outputs actually parse.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: pip install -e .
+
+      - name: Own source scores 100 with a complete scan
+        run: agentgauge . --min-score 100 --fail-on-incomplete
+
+      - name: Clean fixture is not a false positive
+        run: agentgauge tests/fixtures/clean_server.py --min-score 100 --fail-on-incomplete
+
+      - name: Vulnerable fixture is still detected
+        # The regression gate that matters: if detection silently breaks,
+        # this exits 0 and the build must fail.
+        run: |
+          if agentgauge tests/fixtures/vulnerable_server.py; then
+            echo "::error::vulnerable fixture no longer fails -- detection regressed"
+            exit 1
+          fi
+          agentgauge tests/fixtures/vulnerable_server.py --json \
+            | python -c "import json,sys; r=json.load(sys.stdin); \
+                assert r['verdict']=='FAIL_CRITICAL', r['verdict']; \
+                assert r['score']==0.0, r['score']"
+
+      - name: JSON and SARIF output are well-formed
+        run: |
+          agentgauge . --json | python -m json.tool > /dev/null
+          agentgauge . --sarif | python -c "import json,sys; \
+              d=json.load(sys.stdin); \
+              assert d['version']=='2.1.0'; \
+              assert d['runs'][0]['tool']['driver']['version']; \
+              assert 'invocations' in d['runs'][0]"
+
+      - name: Scanning a hostile repository does not crash
+        # Untrusted input is the normal case for this tool.
+        run: |
+          mkdir -p /tmp/hostile
+          printf 'def broken(:\n'            > /tmp/hostile/syntax.py
+          printf "x = '\x00'\n"              > /tmp/hostile/nul.py
+          printf '# -*- coding: nope -*-\n'  > /tmp/hostile/enc.py
+          printf 'import shutil\nshutil.rmtree(p)\n' > /tmp/hostile/real.py
+          agentgauge /tmp/hostile --json > /tmp/hostile.json; test $? -eq 1
+          python -c "import json; r=json.load(open('/tmp/hostile.json')); \
+              assert len(r['skipped'])==3, r['skipped']; \
+              assert r['verdict']=='FAIL_CRITICAL'"
