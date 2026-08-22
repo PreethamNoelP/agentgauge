@@ -88,6 +88,39 @@ What makes it different:
 - 🙈 **Inline suppression** — `# agentgauge: ignore[rule-id]` for incremental adoption, without ever weakening `FAIL_CRITICAL`
 - 🐕 **Dogfooded, including the negative case** — CI fails if the vulnerable fixture ever stops being detected
 
+## 🔌 What leaves your machine: nothing
+
+You are being asked to point this at proprietary code, so here is the whole
+data flow, and it is short:
+
+```
+.py files under your target ─┐
+  (read only)                ├─→ parsed in memory, one file at a time ─→ stdout / stderr
+pyproject.toml or --config ──┘        (nothing kept, nothing written)
+```
+
+| | |
+|---|---|
+| **Network** | None. The package imports `argparse, ast, dataclasses, fnmatch, functools, io, json, os, pathlib, re, sys, tokenize, tomllib, typing` — and nothing else. There is no HTTP client, no socket, no DNS lookup, no update check. |
+| **Telemetry / analytics** | None. There is nothing to send it with. |
+| **Files written** | None. The only three file-opening calls in the package are `tokenize.open` (read), `path.open("rb")` for your config (read), and `os.devnull` when your terminal closes a pipe. No temp files, no cache directory, no database. |
+| **Files read** | `.py` files under the path you name, plus one config file. Nothing else — symlinks pointing outside the scan root are refused. |
+| **Code execution** | None. `ast.parse` and `tokenize` only. Scanned code is never imported, evaluated, or run as a subprocess. |
+| **Environment** | Never read. No `os.environ`, no `getenv`, no credential helpers, no `~` expansion. |
+| **Dependencies** | Zero at runtime. Nothing to audit, no transitive tree, no install hooks. |
+
+**One thing to be aware of, because it is the honest counterpart:** the
+report itself is derived from your source. It contains file paths, function
+and parameter names, resolved call names (`shutil.rmtree`), and the names and
+boolean values of governance flags. It does **not** contain string literals,
+secret values, or source lines. So agentgauge sends nothing anywhere — but
+if *you* upload the SARIF to a third-party dashboard or paste the JSON into
+an issue, treat it with the same care as your code's identifier names.
+
+Every claim above is checkable in one grep, which is the point of keeping the
+package this small. `SECURITY.md` states what does and does not count as a
+vulnerability here.
+
 ## 🏗️ Architecture
 
 ```mermaid

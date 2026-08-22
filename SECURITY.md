@@ -43,6 +43,42 @@ not ordinary bugs:
 - **A weak governance pattern in code agentgauge scores highly.** The
   score is a signal, not an audit result.
 
+## What agentgauge does with your code
+
+Stated precisely, because the whole point of this tool is that you point it
+at code you cannot afford to leak:
+
+- **Nothing is transmitted.** The package's complete import list is
+  `argparse, ast, dataclasses, fnmatch, functools, io, json, os, pathlib,
+  re, sys, tokenize, tomllib, typing`. No HTTP client, no socket, no DNS,
+  no telemetry, no update check.
+- **Nothing is written.** The only file-opening calls in the package are
+  `tokenize.open` (read), `path.open("rb")` for the config file (read), and
+  `os.devnull` when stdout's pipe closes. No temp files, no cache, no
+  persistence of any kind — a scan leaves the filesystem exactly as it was.
+- **Nothing is executed.** `ast.parse` and `tokenize` only. Scanned code is
+  never imported, `eval`'d, `exec`'d, or run as a subprocess.
+- **Nothing outside the target is read.** `.py` files under the path you
+  name, plus one config file. Symlinks resolving outside the scan root are
+  refused rather than followed.
+- **The environment is never read.** No `os.environ`, no `getenv`, no
+  credential helpers.
+
+### The counterpart: what the report contains
+
+agentgauge sends nothing anywhere, but the report it prints is derived from
+your source. It carries file paths, function and parameter names, resolved
+call names, and the names and boolean values of governance flags. It does
+**not** carry string literals, secret values, or source lines.
+
+So the sensitivity of an agentgauge report is roughly the sensitivity of
+your identifier names and file layout. That matters when a report leaves
+your machine by a route agentgauge is not involved in — uploading SARIF to
+a third-party dashboard, pasting JSON into a public issue, or a CI log.
+Reports also name the config file in use; that path is relative to the
+working directory whenever possible, so logs do not disclose a machine's
+directory layout.
+
 ## Supply chain
 
 agentgauge has no runtime dependencies. `pytest` is required only to run

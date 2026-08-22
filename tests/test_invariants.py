@@ -238,3 +238,76 @@ def test_no_suppression_can_turn_a_critical_sink_into_a_pass(marker):
 
     assert report.verdict == "FAIL_CRITICAL"
     assert report.critical_suppressed >= 1
+
+
+# --- the "nothing leaves your machine" promise, enforced ---
+
+# README.md and SECURITY.md both state this exact list. A scanner people run
+# on proprietary code has to be able to back that claim up, and a promise in
+# a markdown file is not a guarantee -- this test is.
+ALLOWED_STDLIB_IMPORTS = {
+    "argparse", "ast", "dataclasses", "fnmatch", "functools", "io", "json",
+    "os", "pathlib", "re", "sys", "tokenize", "tomllib", "typing",
+}
+
+PACKAGE = Path(__file__).parent.parent / "agentgauge"
+
+
+def _package_imports() -> set[str]:
+    found = set()
+    for source in sorted(PACKAGE.rglob("*.py")):
+        for node in ast.walk(ast.parse(source.read_text(encoding="utf-8"))):
+            if isinstance(node, ast.Import):
+                found |= {a.name.split(".")[0] for a in node.names}
+            elif isinstance(node, ast.ImportFrom) and node.module and not node.level:
+                found.add(node.module.split(".")[0])
+    return found - {"agentgauge"}
+
+
+def test_package_imports_nothing_outside_the_documented_stdlib_set():
+    unexpected = _package_imports() - ALLOWED_STDLIB_IMPORTS
+    assert not unexpected, (
+        f"new import(s) {sorted(unexpected)} in the shipped package. If this is "
+        "intentional, update ALLOWED_STDLIB_IMPORTS *and* the import lists in "
+        "README.md and SECURITY.md -- and make sure the new module cannot open "
+        "a socket, or the 'nothing leaves your machine' claim becomes false."
+    )
+
+
+def test_documented_import_list_is_not_stale():
+    # The other direction: a module dropped from the package should be
+    # dropped from the docs too, or the claim overstates what is there.
+    assert _package_imports() == ALLOWED_STDLIB_IMPORTS
+
+
+def test_package_has_no_runtime_dependencies():
+    text = (PACKAGE.parent / "pyproject.toml").read_text(encoding="utf-8")
+    # Only the [project.optional-dependencies] dev extra may list anything.
+    assert "\ndependencies = [" not in text
+
+
+def test_package_never_opens_a_file_for_writing():
+    # Every open() in the package must be a read, or os.devnull. A scan must
+    # leave the filesystem exactly as it found it.
+    for source in sorted(PACKAGE.rglob("*.py")):
+        for node in ast.walk(ast.parse(source.read_text(encoding="utf-8"))):
+            if not isinstance(node, ast.Call):
+                continue
+            func = node.func
+            name = func.attr if isinstance(func, ast.Attribute) else getattr(
+                func, "id", ""
+            )
+            if name != "open":
+                continue
+            modes = [
+                a.value for a in node.args
+                if isinstance(a, ast.Constant) and isinstance(a.value, str)
+            ]
+            writes = [m for m in modes if set("wax+") & set(m)]
+            devnull = any(
+                isinstance(a, ast.Attribute) and a.attr == "devnull"
+                for a in node.args
+            )
+            assert not writes or devnull, (
+                f"{source.name}:{node.lineno} opens a file for writing ({modes})"
+            )
