@@ -263,3 +263,49 @@ def test_valid_suppression_produces_no_warning():
 
     assert report.suppressed == 1
     assert report.warnings == []
+
+
+# --- disabling a rule must not be able to buy back the verdict ---
+
+def test_disabling_human_oversight_cannot_produce_a_pass():
+    # Before: disabled_rules = ["human-oversight"] removed the only rule
+    # that marks findings critical, so an ungated shutil.rmtree scored
+    # a clean PASS and exited 0 -- the whole point of the gate, defeated
+    # by one config line.
+    report = score_contexts(
+        [ctx("import shutil\ndef wipe(path):\n    shutil.rmtree(path)\n")],
+        disabled_rules=frozenset({"human-oversight"}),
+    )
+
+    assert report.verdict == "INCOMPLETE"
+    assert report.gate_disabled == ("human-oversight",)
+    assert report.to_dict()["critical_gate_active"] is False
+    assert any("FAIL_CRITICAL gate" in w for w in report.warnings)
+
+
+def test_disabling_a_non_gate_rule_leaves_the_verdict_alone():
+    report = score_contexts(
+        [ctx("auto_approve = True\n")],
+        disabled_rules=frozenset({"rate-limiting"}),
+    )
+
+    assert report.verdict == "PASS"
+    assert report.gate_disabled == ()
+    assert report.to_dict()["critical_gate_active"] is True
+
+
+# --- a score over zero applicable sites is not evidence of governance ---
+
+def test_zero_applicable_sites_is_reported_as_such():
+    report = score_contexts([ctx("def add(a, b):\n    return a + b\n")])
+
+    assert report.score == 100.0
+    assert report.total_sites == 0
+    assert any("absence of anything to check" in w for w in report.warnings)
+
+
+def test_any_applicable_site_suppresses_the_zero_site_warning():
+    report = score_contexts([ctx("auto_approve = False\n")])
+
+    assert report.total_sites == 1
+    assert report.warnings == []

@@ -30,6 +30,12 @@ from agentgauge.rules import (
 # The single registry every downstream consumer (scanner, CLI) uses.
 ALL_RULES = [oversight, audit, ratelimit, errorhandling, validation, defaults]
 
+# Rules whose findings are the only source of `critical`, and therefore of
+# FAIL_CRITICAL. Disabling one of these does not just drop a category from
+# the score -- it removes the gate itself, which is why ScanReport refuses
+# to call such a scan a PASS (see ScanReport.verdict).
+CRITICAL_GATE_RULES = frozenset({oversight.RULE_ID})
+
 
 @dataclass
 class ScanReport:
@@ -44,6 +50,8 @@ class ScanReport:
     # unparseable or unknown-rule suppression comments, disabled rules that
     # matter to the verdict. Reported, never silently swallowed.
     warnings: list[str] = field(default_factory=list)
+    # Critical-gate-bearing rules that config turned off for this scan.
+    gate_disabled: tuple[str, ...] = ()
 
     @property
     def score(self) -> float:
@@ -74,12 +82,29 @@ class ScanReport:
         silently clearing the one guarantee this tool exists to make would
         just be issue #1 wearing a suppression comment instead of an
         average; critical_suppressed exists specifically so it can't.
+
+        `disabled_rules` cannot buy it back either, for exactly the same
+        reason. Turning off the rule that produces critical findings does
+        not make the scan clean, it makes it blind -- so a scan without the
+        gate is reported INCOMPLETE, never PASS. Unlike a suppression this
+        cannot be FAIL_CRITICAL: with the rule switched off we never looked
+        for the sinks, so we have no finding to fail on and no honest way to
+        claim one. INCOMPLETE is the truthful answer, and
+        --fail-on-incomplete is how CI turns it into a red build.
         """
         if any(f.critical for f in self.findings) or self.critical_suppressed:
             return "FAIL_CRITICAL"
-        if self.skipped:
+        if self.skipped or self.gate_disabled:
             return "INCOMPLETE"
         return "PASS"
+
+    @property
+    def total_sites(self) -> int:
+        """Applicable sites across every category. Zero means the scan found
+        no governance-relevant code at all -- no sensitive calls, no tool
+        functions, no flags -- so the score is the "zero sites, full marks"
+        rule applied six times over, not evidence of governance."""
+        return sum(c.sites for c in self.categories)
 
     @property
     def findings(self) -> list[Finding]:
@@ -95,6 +120,8 @@ class ScanReport:
             "max_score": self.max_score,
             "verdict": self.verdict,
             "files_scanned": self.files_scanned,
+            "total_sites": self.total_sites,
+            "critical_gate_active": not self.gate_disabled,
             "categories": [
                 {
                     "name": c.name,
@@ -177,10 +204,25 @@ def score_contexts(
             cat.sites += sites
             cat.passed += passed
             cat.findings.extend(kept)
-    return ScanReport(
+    gate_disabled = tuple(sorted(disabled_rules & CRITICAL_GATE_RULES))
+    for rule_id in gate_disabled:
+        warnings.append(
+            f"'{rule_id}' is disabled, which removes the FAIL_CRITICAL gate "
+            "entirely -- no ungated payment, deletion or shell-exec call can "
+            "be detected in this scan, so its verdict is INCOMPLETE"
+        )
+    report = ScanReport(
         categories=categories,
         files_scanned=files_scanned,
         suppressed=suppressed,
         critical_suppressed=critical_suppressed,
         warnings=warnings,
+        gate_disabled=gate_disabled,
     )
+    if files_scanned and report.total_sites == 0:
+        warnings.append(
+            f"no governance-relevant sites found in {files_scanned} file(s): "
+            "this score reflects the absence of anything to check, not "
+            "evidence of governance"
+        )
+    return report
