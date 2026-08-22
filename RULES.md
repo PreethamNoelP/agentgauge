@@ -424,8 +424,14 @@ Suppression is treated as a security-sensitive feature, so:
   `# agentgauge: ignore[permissive-default]` suppresses nothing; a
   suppression that silently fails to work is nearly as bad as one that
   silently works too well.
-- **`# agentgauge: ignored in review` is not a marker.** The word must
-  stand alone.
+- **A bare `ignore` followed by prose is malformed too.**
+  `# agentgauge: ignore rate-limiting` (brackets forgotten) used to
+  suppress every rule on the line. A free-text reason is fine, but it has
+  to announce itself: `# agentgauge: ignore -- the gateway gates this`,
+  or `:` / `#` as the delimiter. After a bracketed rule list, any trailing
+  text is taken as a reason.
+- **`# agentgauge: ignored in review` is not a marker either.** The word
+  must stand alone.
 - **Scope is exactly one line** — the line the finding is reported on. For a
   multi-line call, that is the line the call starts on.
 - **An unqualified `# agentgauge: ignore` covers every rule, including ones

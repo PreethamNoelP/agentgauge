@@ -310,8 +310,15 @@ def enclosing_function(
 # Matching greedily and validating afterwards keeps a malformed marker
 # malformed. \b stops "ignored"/"ignoring" in prose from suppressing.
 _SUPPRESS_RE = re.compile(
-    r"#\s*agentgauge:\s*ignore\b[ \t]*(\[[^\]]*\])?", re.IGNORECASE
+    r"#\s*agentgauge:\s*ignore\b[ \t]*(\[[^\]]*\])?[ \t]*(.*)$", re.IGNORECASE
 )
+
+# A free-text reason may follow the directive, but it has to announce
+# itself. Bare `ignore` followed by prose is a malformed directive, not a
+# blanket one: "# agentgauge: ignore rate-limiting" (brackets forgotten)
+# must not silently suppress every rule on the line, including rules added
+# in later versions.
+_REASON_RE = re.compile(r"^(--|:|#)")
 
 _MARKER_RE = re.compile(r"agentgauge", re.IGNORECASE)
 
@@ -353,8 +360,16 @@ def _parse_suppressions(
                 continue
             line = tok.start[0]
             brackets = match.group(1)
+            trailing = match.group(2).strip()
             if brackets is None:
-                suppressions[line] = None
+                if trailing and not _REASON_RE.match(trailing):
+                    malformed.append(
+                        (line, f"unexpected text after 'ignore': {trailing!r} "
+                               "-- name rules as ignore[rule-id], or start a "
+                               "reason with '--'")
+                    )
+                else:
+                    suppressions[line] = None
                 continue
             rules = [r.strip().lower() for r in brackets[1:-1].split(",")]
             rules = [r for r in rules if r]

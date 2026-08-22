@@ -400,3 +400,36 @@ def test_multi_target_assignment_is_not_an_alias():
     tree = ast.parse("import os\na = b = os.remove\n")
     aliases = build_import_aliases(tree)
     assert "a" not in aliases and "b" not in aliases
+
+
+def test_bare_ignore_followed_by_prose_is_malformed():
+    # "# agentgauge: ignore rate-limiting" -- brackets forgotten -- used to
+    # suppress EVERY rule on the line, including rules added in later
+    # versions. The narrowest reading of a directive we cannot parse is
+    # that no exemption was granted.
+    ctx = FileContext.from_source(
+        "shutil.rmtree(path)  # agentgauge: ignore rate-limiting\n", path="mem.py"
+    )
+    assert ctx.is_suppressed("rate-limiting", 1) is False
+    assert ctx.is_suppressed("human-oversight", 1) is False
+    assert "unexpected text" in ctx.malformed_suppressions[0][1]
+
+
+def test_bare_ignore_with_a_delimited_reason_still_suppresses():
+    for comment in (
+        "# agentgauge: ignore -- the gateway gates this",
+        "# agentgauge: ignore: gateway",
+        "# agentgauge: ignore # gateway",
+        "# agentgauge: ignore",
+    ):
+        ctx = FileContext.from_source(f"auto_approve = True  {comment}\n", path="m.py")
+        assert ctx.is_suppressed("permissive-defaults", 1) is True, comment
+        assert ctx.malformed_suppressions == [], comment
+
+
+def test_ignore_all_is_not_a_directive():
+    ctx = FileContext.from_source(
+        "auto_approve = True  # agentgauge: ignore-all\n", path="mem.py"
+    )
+    assert ctx.is_suppressed("permissive-defaults", 1) is False
+    assert ctx.malformed_suppressions
