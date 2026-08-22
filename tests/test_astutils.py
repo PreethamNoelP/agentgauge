@@ -191,3 +191,53 @@ def test_suppression_marker_in_a_string_literal_is_not_a_comment():
         'msg = "# agentgauge: ignore"\nshutil.rmtree(path)\n', path="mem.py"
     )
     assert ctx.is_suppressed("human-oversight", 2) is False
+
+
+# --- vocabulary coverage for sinks that the first tables missed ---
+
+def test_pathlib_unlink_is_a_file_delete_sink():
+    # Path(p).unlink() is the modern deletion idiom; a table that only knew
+    # os.remove/shutil.rmtree scored such code a clean 100.
+    assert sensitive_label(first_call("target.unlink()")) == "file delete"
+
+
+def test_async_subprocess_is_a_shell_exec_sink():
+    src = "asyncio.create_subprocess_shell(cmd)"
+    assert sensitive_label(first_call(src)) == "shell exec"
+
+
+def test_async_subprocess_on_any_receiver_is_a_shell_exec_sink():
+    assert sensitive_label(first_call("loop.create_subprocess_exec(*argv)")) == "shell exec"
+
+
+def test_subprocess_getoutput_is_a_shell_exec_sink():
+    assert sensitive_label(first_call("subprocess.getoutput(cmd)")) == "shell exec"
+
+
+def test_pickle_loads_is_a_code_exec_sink():
+    assert sensitive_label(first_call("pickle.loads(blob)")) == "code exec"
+
+
+def test_yaml_load_is_not_flagged_but_unsafe_load_is():
+    # yaml.load(s, Loader=SafeLoader) is safe and ubiquitous -- flagging it
+    # would make the critical gate untrustworthy. yaml.unsafe_load names
+    # its own risk, so it is fair game.
+    assert sensitive_label(first_call("yaml.load(text, Loader=SafeLoader)")) is None
+    assert sensitive_label(first_call("yaml.unsafe_load(text)")) == "code exec"
+
+
+def test_bulk_remote_deletion_is_a_sink():
+    assert sensitive_label(first_call("s3.delete_bucket(Bucket=b)")) == "remote delete"
+    assert sensitive_label(first_call("col.delete_many(query)")) == "remote delete"
+
+
+def test_stripe_style_payment_calls_are_sinks():
+    src = "stripe.PaymentIntent.create_payment_intent(amount=n)"
+    assert sensitive_label(first_call(src)) == "payment"
+
+
+def test_generic_delete_is_still_not_flagged():
+    # The suffix table must stay distinctive: a cache eviction or a list
+    # removal is not a governance event.
+    assert sensitive_label(first_call("cache.delete(key)")) is None
+    assert sensitive_label(first_call("items.remove(x)")) is None

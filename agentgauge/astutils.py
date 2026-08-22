@@ -21,6 +21,8 @@ SENSITIVE_EXACT: dict[str, str] = {
     "os.remove": "file delete",
     "os.unlink": "file delete",
     "os.rmdir": "file delete",
+    "os.removedirs": "file delete",
+    "os.truncate": "file delete",
     "shutil.rmtree": "file delete",
     # shell / process execution
     "os.system": "shell exec",
@@ -30,11 +32,43 @@ SENSITIVE_EXACT: dict[str, str] = {
     "subprocess.check_call": "shell exec",
     "subprocess.check_output": "shell exec",
     "subprocess.Popen": "shell exec",
+    "subprocess.getoutput": "shell exec",
+    "subprocess.getstatusoutput": "shell exec",
+    "os.execl": "shell exec",
+    "os.execle": "shell exec",
+    "os.execlp": "shell exec",
+    "os.execv": "shell exec",
+    "os.execve": "shell exec",
+    "os.execvp": "shell exec",
+    "os.execvpe": "shell exec",
+    "os.posix_spawn": "shell exec",
+    "os.posix_spawnp": "shell exec",
+    "os.spawnl": "shell exec",
+    "os.spawnv": "shell exec",
+    "pty.spawn": "shell exec",
+    # async process execution -- the asyncio equivalents of subprocess.*,
+    # which an agent server written with async handlers is more likely to
+    # use than the blocking API.
+    "asyncio.create_subprocess_shell": "shell exec",
+    "asyncio.create_subprocess_exec": "shell exec",
     # dynamic code execution
     "eval": "code exec",
     "exec": "code exec",
+    # deserialization that is equivalent to code execution on untrusted
+    # input -- the realistic shape being "agent output -> loads()". Only
+    # APIs with no safe mode are listed: yaml.load is deliberately absent
+    # (yaml.load(s, Loader=SafeLoader) is safe and far too common to flag),
+    # while yaml.unsafe_load names its own risk.
+    "pickle.load": "code exec",
+    "pickle.loads": "code exec",
+    "marshal.load": "code exec",
+    "marshal.loads": "code exec",
+    "dill.load": "code exec",
+    "dill.loads": "code exec",
+    "yaml.unsafe_load": "code exec",
     # state-changing HTTP
     "requests.delete": "remote delete",
+    "httpx.delete": "remote delete",
 }
 
 # Bare method names distinctive enough to flag on ANY receiver
@@ -43,16 +77,46 @@ SENSITIVE_EXACT: dict[str, str] = {
 # any normal repo.
 SENSITIVE_SUFFIX: dict[str, str] = {
     "rmtree": "file delete",
+    "unlink": "file delete",       # pathlib.Path.unlink -- the modern idiom
+    "rmdir": "file delete",
+    "removedirs": "file delete",
     "delete_file": "file delete",
     "remove_file": "file delete",
+    "delete_directory": "file delete",
+    "remove_directory": "file delete",
     "Popen": "shell exec",
     "check_output": "shell exec",
+    "getoutput": "shell exec",
+    "getstatusoutput": "shell exec",
+    "create_subprocess_shell": "shell exec",
+    "create_subprocess_exec": "shell exec",
+    "unsafe_load": "code exec",
+    # bulk/remote destruction: object stores, databases, cloud instances.
+    # All distinctive multi-word names -- bare "delete"/"drop" stay out.
+    "delete_object": "remote delete",
+    "delete_objects": "remote delete",
+    "delete_bucket": "remote delete",
+    "delete_many": "remote delete",
+    "delete_all": "remote delete",
+    "destroy_all": "remote delete",
+    "drop_table": "remote delete",
+    "drop_database": "remote delete",
+    "drop_collection": "remote delete",
+    "truncate_table": "remote delete",
+    "terminate_instances": "remote delete",
     "charge": "payment",
+    "create_charge": "payment",
     "create_payment": "payment",
+    "create_payment_intent": "payment",
     "send_payment": "payment",
+    "send_money": "payment",
     "transfer_funds": "payment",
+    "wire_transfer": "payment",
+    "create_transfer": "payment",
+    "capture_payment": "payment",
     "refund": "payment",
     "payout": "payment",
+    "create_payout": "payment",
 }
 
 # Consequence categories severe enough that a single missed approval gate
