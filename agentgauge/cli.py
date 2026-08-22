@@ -50,6 +50,8 @@ def _print_report(report: ScanReport, target: str) -> None:
             print(f"    {f.message}")
             print(f"    fix: {f.fix}")
 
+    for entry in report.warnings:
+        print(f"warning: {entry}", file=sys.stderr)
     for entry in report.skipped:
         print(f"warning: skipped {entry}", file=sys.stderr)
 

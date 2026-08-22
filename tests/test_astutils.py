@@ -304,3 +304,54 @@ def test_iter_scope_does_not_enter_nested_functions():
 def test_iter_scope_of_a_function_yields_the_function_itself():
     fn = ast.parse("def f():\n    pass\n").body[0]
     assert next(iter_scope(fn)) is fn
+
+
+# --- malformed suppressions must not escalate into blanket ones ---
+
+def test_empty_bracket_suppression_is_malformed_and_suppresses_nothing():
+    # "ignore[]" reads as "suppress nothing"; the first pattern failed to
+    # match the bracketed form, fell back to bare "ignore", and suppressed
+    # every rule on the line instead.
+    ctx = FileContext.from_source(
+        "shutil.rmtree(path)  # agentgauge: ignore[]\n", path="mem.py"
+    )
+    assert ctx.is_suppressed("human-oversight", 1) is False
+    assert len(ctx.malformed_suppressions) == 1
+    assert ctx.malformed_suppressions[0][0] == 1
+
+
+def test_invalid_rule_id_in_brackets_is_malformed_not_blanket():
+    ctx = FileContext.from_source(
+        "shutil.rmtree(path)  # agentgauge: ignore[human oversight!]\n", path="mem.py"
+    )
+    assert ctx.is_suppressed("human-oversight", 1) is False
+    assert ctx.is_suppressed("error-handling", 1) is False
+    assert ctx.malformed_suppressions
+
+
+def test_ignore_inside_a_longer_word_is_not_a_marker():
+    ctx = FileContext.from_source(
+        "shutil.rmtree(path)  # agentgauge: ignored this in review\n", path="mem.py"
+    )
+    assert ctx.is_suppressed("human-oversight", 1) is False
+    assert ctx.malformed_suppressions == []
+
+
+def test_unknown_but_well_formed_rule_id_suppresses_nothing_real():
+    # Well-formed shape, so not "malformed" -- but it names no real rule,
+    # which the scoring pass reports as an ineffective suppression.
+    ctx = FileContext.from_source(
+        "shutil.rmtree(path)  # agentgauge: ignore[oversight]\n", path="mem.py"
+    )
+    assert ctx.is_suppressed("human-oversight", 1) is False
+    assert ctx.suppressions[1] == frozenset({"oversight"})
+    assert ctx.malformed_suppressions == []
+
+
+def test_trailing_reason_after_a_rule_list_still_parses():
+    ctx = FileContext.from_source(
+        "shutil.rmtree(path)  # agentgauge: ignore[human-oversight] gateway gates this\n",
+        path="mem.py",
+    )
+    assert ctx.is_suppressed("human-oversight", 1) is True
+    assert ctx.is_suppressed("error-handling", 1) is False

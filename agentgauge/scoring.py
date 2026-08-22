@@ -40,6 +40,10 @@ class ScanReport:
     skipped: list[str] = field(default_factory=list)
     suppressed: int = 0
     critical_suppressed: int = 0
+    # Human-readable notes about the scan itself rather than the code:
+    # unparseable or unknown-rule suppression comments, disabled rules that
+    # matter to the verdict. Reported, never silently swallowed.
+    warnings: list[str] = field(default_factory=list)
 
     @property
     def score(self) -> float:
@@ -105,7 +109,33 @@ class ScanReport:
             "skipped": self.skipped,
             "suppressed": self.suppressed,
             "critical_suppressed": self.critical_suppressed,
+            "warnings": self.warnings,
         }
+
+
+def _suppression_warnings(ctx: FileContext, known_rule_ids: set[str]) -> list[str]:
+    """Report suppression comments that do not do what their author meant.
+
+    A suppression is the one mechanism by which a human overrides this tool,
+    so a broken one must be loud. Two shapes are reported: markers that could
+    not be parsed at all (they grant no exemption), and well-formed markers
+    naming a rule id that does not exist -- usually a typo, and silently
+    ineffective otherwise.
+    """
+    notes = [
+        f"{ctx.path}:{line}: malformed agentgauge suppression ({reason}) "
+        "-- nothing was suppressed"
+        for line, reason in ctx.malformed_suppressions
+    ]
+    for line, rules in sorted(ctx.suppressions.items()):
+        if rules is None:
+            continue
+        for unknown in sorted(rules - known_rule_ids):
+            notes.append(
+                f"{ctx.path}:{line}: agentgauge suppression names unknown rule "
+                f"'{unknown}' -- it has no effect"
+            )
+    return notes
 
 
 def score_contexts(
@@ -117,11 +147,14 @@ def score_contexts(
         CategoryResult(name=rule.CATEGORY, weight=rule.WEIGHT)
         for rule in active_rules
     ]
+    known_rule_ids = {rule.RULE_ID for rule in ALL_RULES}
     files_scanned = 0
     suppressed = 0
     critical_suppressed = 0
+    warnings: list[str] = []
     for ctx in contexts:  # one context alive at a time; never materialized
         files_scanned += 1
+        warnings.extend(_suppression_warnings(ctx, known_rule_ids))
         for rule, cat in zip(active_rules, categories):
             sites, passed, findings = rule.check(ctx)
             kept = []
@@ -149,4 +182,5 @@ def score_contexts(
         files_scanned=files_scanned,
         suppressed=suppressed,
         critical_suppressed=critical_suppressed,
+        warnings=warnings,
     )

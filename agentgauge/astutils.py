@@ -277,17 +277,43 @@ def enclosing_function(
 # Matches "# agentgauge: ignore" (suppresses every rule on that line) or
 # "# agentgauge: ignore[human-oversight, audit-logging]" (suppresses only the
 # named rules) -- the same shape as flake8's "# noqa" / bandit's "# nosec".
-_SUPPRESS_RE = re.compile(r"#\s*agentgauge:\s*ignore(?:\[([\w, -]+)\])?", re.IGNORECASE)
+#
+# The bracket group captures anything up to "]" rather than only well-formed
+# rule ids on purpose. An earlier pattern accepted only [\w, -]+ inside the
+# brackets, which meant "ignore[]" and "ignore[typo!]" failed to match the
+# bracketed alternative, fell back to the bare "ignore" alternative, and
+# silently escalated a narrow (or empty) suppression into a blanket one.
+# Matching greedily and validating afterwards keeps a malformed marker
+# malformed. \b stops "ignored"/"ignoring" in prose from suppressing.
+_SUPPRESS_RE = re.compile(
+    r"#\s*agentgauge:\s*ignore\b[ \t]*(\[[^\]]*\])?", re.IGNORECASE
+)
+
+# Rule ids are lowercase kebab-case ("human-oversight"). Anything else in a
+# suppression list is a typo, not a rule we might not know about yet.
+_RULE_ID_RE = re.compile(r"^[a-z][a-z0-9]*(?:-[a-z0-9]+)*$")
 
 
-def _parse_suppressions(source: str) -> dict[int, frozenset[str] | None]:
+def _parse_suppressions(
+    source: str,
+) -> tuple[dict[int, frozenset[str] | None], list[tuple[int, str]]]:
     """Scan comment tokens (not a text search -- a string literal that
     happens to contain the marker must not count) for suppression markers.
-    Maps line number -> None (suppress everything on that line) or a
-    frozenset of rule ids (suppress only those). Best-effort: a source that
-    parses with ast.parse but somehow fails to tokenize just gets no
-    suppressions rather than aborting the scan."""
+
+    Returns (suppressions, malformed):
+      - suppressions maps line number -> None (suppress everything on that
+        line) or a frozenset of rule ids (suppress only those).
+      - malformed lists (line, reason) for markers that could not be parsed.
+        A malformed marker suppresses *nothing*: a suppression is a security
+        decision, and the safe reading of one we cannot understand is that
+        no exemption was granted. The reason is surfaced as a scan warning so
+        a typo does not just sit there silently failing to do its job.
+
+    Best-effort: a source that parses with ast.parse but somehow fails to
+    tokenize just gets no suppressions rather than aborting the scan.
+    """
     suppressions: dict[int, frozenset[str] | None] = {}
+    malformed: list[tuple[int, str]] = []
     try:
         for tok in tokenize.generate_tokens(io.StringIO(source).readline):
             if tok.type != tokenize.COMMENT:
@@ -295,16 +321,23 @@ def _parse_suppressions(source: str) -> dict[int, frozenset[str] | None]:
             match = _SUPPRESS_RE.search(tok.string)
             if match is None:
                 continue
-            rules = match.group(1)
-            if rules is None:
-                suppressions[tok.start[0]] = None
+            line = tok.start[0]
+            brackets = match.group(1)
+            if brackets is None:
+                suppressions[line] = None
+                continue
+            rules = [r.strip().lower() for r in brackets[1:-1].split(",")]
+            rules = [r for r in rules if r]
+            if not rules:
+                malformed.append((line, "empty rule list in 'ignore[]'"))
+            elif any(not _RULE_ID_RE.match(r) for r in rules):
+                bad = next(r for r in rules if not _RULE_ID_RE.match(r))
+                malformed.append((line, f"'{bad}' is not a valid rule id"))
             else:
-                suppressions[tok.start[0]] = frozenset(
-                    r.strip().lower() for r in rules.split(",") if r.strip()
-                )
+                suppressions[line] = frozenset(rules)
     except (tokenize.TokenError, SyntaxError, IndentationError):
         pass
-    return suppressions
+    return suppressions, malformed
 
 
 @dataclass
@@ -318,6 +351,9 @@ class FileContext:
     import_aliases: dict[str, str] = field(default_factory=dict)
     config: RuleConfig = field(default_factory=RuleConfig)
     suppressions: dict[int, frozenset[str] | None] = field(default_factory=dict)
+    # (line, reason) for suppression comments that could not be parsed; they
+    # grant no exemption and are reported as warnings by the scoring pass.
+    malformed_suppressions: list[tuple[int, str]] = field(default_factory=list)
 
     @classmethod
     def from_source(
@@ -327,13 +363,15 @@ class FileContext:
         config: RuleConfig | None = None,
     ) -> "FileContext":
         tree = ast.parse(source)
+        suppressions, malformed = _parse_suppressions(source)
         return cls(
             path=path,
             tree=tree,
             parents=build_parent_map(tree),
             import_aliases=build_import_aliases(tree),
             config=config if config is not None else RuleConfig(),
-            suppressions=_parse_suppressions(source),
+            suppressions=suppressions,
+            malformed_suppressions=malformed,
         )
 
     def is_suppressed(self, rule: str, line: int) -> bool:

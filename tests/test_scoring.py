@@ -225,3 +225,41 @@ def test_suppressing_a_non_critical_finding_does_not_affect_verdict():
     )
     assert report.critical_suppressed == 0
     assert report.verdict == "PASS"
+
+
+# --- suppression comments that do not do what their author meant ---
+
+def test_malformed_suppression_is_reported_as_a_warning():
+    ctx = FileContext.from_source(
+        "import shutil\n"
+        "def wipe(path):\n"
+        "    shutil.rmtree(path)  # agentgauge: ignore[]\n",
+        path="mem.py",
+    )
+    report = score_contexts([ctx])
+
+    assert report.suppressed == 0
+    assert report.verdict == "FAIL_CRITICAL"
+    assert any("malformed" in w for w in report.warnings)
+
+
+def test_unknown_rule_id_in_a_suppression_is_reported_as_a_warning():
+    ctx = FileContext.from_source(
+        "auto_approve = True  # agentgauge: ignore[permissive-default]\n",
+        path="mem.py",
+    )
+    report = score_contexts([ctx])
+
+    assert report.suppressed == 0
+    assert any("unknown rule 'permissive-default'" in w for w in report.warnings)
+
+
+def test_valid_suppression_produces_no_warning():
+    ctx = FileContext.from_source(
+        "auto_approve = True  # agentgauge: ignore[permissive-defaults]\n",
+        path="mem.py",
+    )
+    report = score_contexts([ctx])
+
+    assert report.suppressed == 1
+    assert report.warnings == []
