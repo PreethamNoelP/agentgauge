@@ -83,7 +83,7 @@ def test_score_contexts_accepts_a_lazy_iterable():
     assert report.score == 55.0  # midpoint: one all-fail file, one all-pass
 
 
-# --- verdict: a gate independent of the 0-100 score (issue #1) ---
+# --- verdict: a gate independent of the 0-100 score ---
 
 def test_clean_scan_verdict_is_pass():
     report = score_contexts([ctx("def add(a, b):\n    return a + b\n")])
@@ -146,7 +146,7 @@ def _payment_tool_missing_approval(i: int) -> str:
 
 
 def test_single_ungated_critical_action_cannot_be_diluted_to_a_pass():
-    # Regression for issue #1 ("critical-site dilution"): 99 fully-governed
+    # Regression for critical-site dilution: 99 fully-governed
     # payment tools plus one missing only its approval check scored 99.75
     # and sailed past --min-score 90 despite a live, unguarded payment call.
     # The verdict must catch what the averaged score hides.
@@ -207,7 +207,7 @@ def test_suppression_scoped_to_a_different_rule_does_not_apply():
 
 def test_suppressing_a_critical_finding_still_forces_fail_critical():
     # A one-line comment must not be able to buy back the one guarantee
-    # that score-averaging itself is barred from buying back (issue #1).
+    # that score-averaging itself is barred from buying back.
     report = score_contexts(
         [ctx(
             "def wipe(path):\n"

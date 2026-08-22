@@ -32,7 +32,7 @@ def test_min_score_gate_returns_one(tmp_path, capsys):
 
 def test_critical_finding_returns_one_even_without_min_score(tmp_path, capsys):
     # A live, unguarded critical action must fail the build on its own --
-    # no --min-score needed to catch it (issue #1).
+    # no --min-score needed to catch it (critical-site dilution).
     (tmp_path / "bad.py").write_text(
         "def wipe(path):\n    shutil.rmtree(path)\n"
     )

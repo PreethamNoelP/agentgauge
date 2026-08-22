@@ -123,7 +123,8 @@ SENSITIVE_SUFFIX: dict[str, str] = {
 # Consequence categories severe enough that a single missed approval gate
 # must fail CI outright -- no volume of compliant sites elsewhere should be
 # able to average this away (score averaging otherwise dilutes one
-# catastrophic site across many low-risk ones; see issue #1).
+# catastrophic site across many low-risk ones -- see "critical-site
+# dilution" in RULES.md).
 CRITICAL_LABELS = {"file delete", "shell exec", "code exec", "payment", "remote delete"}
 
 

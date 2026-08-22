@@ -67,7 +67,7 @@ def test_min_score_gate_end_to_end():
 
 def test_critical_verdict_fails_end_to_end_without_min_score():
     # No --min-score at all: a live critical finding must still fail the
-    # build (issue #1) rather than defaulting to a pass.
+    # build (critical-site dilution) rather than defaulting to a pass.
     proc = subprocess.run(
         [sys.executable, "-m", "agentgauge", str(FIXTURES / "vulnerable_server.py")],
         capture_output=True,

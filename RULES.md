@@ -28,7 +28,8 @@ Category points = `weight × passed / sites`. Consequences:
    a warning on stderr — *"this score reflects the absence of anything to
    check, not evidence of governance."* Treat it as "agentgauge found no
    agent tool-calling code here", not as a clean bill of health.
-4. **Averaging can't buy back a critical miss.** The score is an average
+4. **Averaging can't buy back a critical miss** (*critical-site
+   dilution*, the name used for this in code comments). The score is an average
    across sites, so one catastrophic site can be diluted by many compliant
    ones — 99 fully-governed payment tools plus 1 with no approval check
    still average to 99.75/100. `ScanReport.verdict` is the independent gate:

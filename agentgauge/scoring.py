@@ -71,7 +71,8 @@ class ScanReport:
         0-100 score. A single ungated critical action (payment, file
         delete, shell exec, code exec, remote delete) must fail outright;
         averaging it against every other compliant site would dilute a
-        catastrophic finding into a passing score (issue #1). Skipped files
+        catastrophic finding into a passing score -- the critical-site
+        dilution problem RULES.md describes. Skipped files
         mean the scan didn't see the whole picture, so a clean result over
         a partial view is not a full PASS either.
 
@@ -80,8 +81,9 @@ class ScanReport:
         list and credited toward the score (see score_contexts), but it
         must not be able to buy back FAIL_CRITICAL. A one-line comment
         silently clearing the one guarantee this tool exists to make would
-        just be issue #1 wearing a suppression comment instead of an
-        average; critical_suppressed exists specifically so it can't.
+        just be critical-site dilution wearing a suppression comment
+        instead of an average; critical_suppressed exists specifically
+        so it can't.
 
         `disabled_rules` cannot buy it back either, for exactly the same
         reason. Turning off the rule that produces critical findings does

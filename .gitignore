@@ -23,6 +23,29 @@ htmlcov/
 .idea/
 .vscode/
 
-# Windows / OneDrive noise
+# Secrets and credentials. Nothing of the sort exists in this repo and
+# nothing should, but a governance scanner is a bad place to learn that
+# .gitignore was one line short.
+.env
+.env.*
+*.pem
+*.key
+*.p12
+*.pfx
+*.crt
+credentials
+credentials.*
+.netrc
+.pypirc
+.npmrc
+secrets.*
+
+# agentgauge's own report output. `agentgauge . --sarif > report.sarif` in
+# the repo root is a very easy accident to commit.
+*.sarif
+agentgauge-report.json
+
+# OS noise
 Thumbs.db
 desktop.ini
+.DS_Store
