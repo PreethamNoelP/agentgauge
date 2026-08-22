@@ -11,6 +11,7 @@ import io
 import re
 import tokenize
 from dataclasses import dataclass, field
+from functools import cached_property
 
 from agentgauge.config import RuleConfig
 
@@ -289,6 +290,8 @@ _SUPPRESS_RE = re.compile(
     r"#\s*agentgauge:\s*ignore\b[ \t]*(\[[^\]]*\])?", re.IGNORECASE
 )
 
+_MARKER_RE = re.compile(r"agentgauge", re.IGNORECASE)
+
 # Rule ids are lowercase kebab-case ("human-oversight"). Anything else in a
 # suppression list is a typo, not a rule we might not know about yet.
 _RULE_ID_RE = re.compile(r"^[a-z][a-z0-9]*(?:-[a-z0-9]+)*$")
@@ -314,6 +317,10 @@ def _parse_suppressions(
     """
     suppressions: dict[int, frozenset[str] | None] = {}
     malformed: list[tuple[int, str]] = []
+    # Tokenizing every file to find a marker almost none of them contain was
+    # ~8% of scan time. A source without the word cannot hold a marker.
+    if _MARKER_RE.search(source) is None:
+        return suppressions, malformed
     try:
         for tok in tokenize.generate_tokens(io.StringIO(source).readline):
             if tok.type != tokenize.COMMENT:
@@ -343,11 +350,16 @@ def _parse_suppressions(
 @dataclass
 class FileContext:
     """Everything a rule needs to know about one parsed file. Rules all
-    share one signature: check(ctx) -> (sites, passed, findings)."""
+    share one signature: check(ctx) -> (sites, passed, findings).
+
+    The `functions`, `sensitive_calls` and `tool_functions` views are cached
+    per file. Six rules asking the same three questions used to mean the
+    same subtrees were walked a dozen times over -- ast.walk is the whole
+    cost of a scan, and a rule should not have to know that to stay fast.
+    """
 
     path: str
     tree: ast.AST
-    parents: dict[ast.AST, ast.AST]
     import_aliases: dict[str, str] = field(default_factory=dict)
     config: RuleConfig = field(default_factory=RuleConfig)
     suppressions: dict[int, frozenset[str] | None] = field(default_factory=dict)
@@ -367,12 +379,55 @@ class FileContext:
         return cls(
             path=path,
             tree=tree,
-            parents=build_parent_map(tree),
             import_aliases=build_import_aliases(tree),
             config=config if config is not None else RuleConfig(),
             suppressions=suppressions,
             malformed_suppressions=malformed,
         )
+
+    @cached_property
+    def parents(self) -> dict[ast.AST, ast.AST]:
+        """Node -> parent, built on first use.
+
+        Every question that needs it ("what function encloses this call?",
+        "is this call in a try body?") starts from a sensitive call, so a
+        file with no sinks -- most files in most repos -- never builds it.
+        That saves both a full tree walk and a dict entry per AST node,
+        which is the largest single allocation a scan makes.
+        """
+        return build_parent_map(self.tree)
+
+    @cached_property
+    def functions(self) -> list["FunctionNode"]:
+        """Every def/async def in the file, nested ones included."""
+        return list(iter_functions(self.tree))
+
+    @cached_property
+    def sensitive_calls(self) -> list[tuple[ast.Call, str]]:
+        """Every (call, action label) pair in the file, alias-resolved."""
+        return list(iter_sensitive_calls(self.tree, self.import_aliases))
+
+    @cached_property
+    def tool_functions(self) -> set["FunctionNode"]:
+        """The functions held to tool-governance standards (rules 2, 3, 5).
+
+        Same population as is_tool_function() over every function, computed
+        the other way round: rather than re-scanning each function's subtree
+        for sinks, walk up from each known sink and mark the functions
+        enclosing it. O(sinks x depth) instead of O(functions x size), and
+        the sink list is already cached.
+        """
+        tools = {
+            fn for fn in self.functions
+            if has_tool_decorator(fn, self.import_aliases)
+        }
+        for call, _label in self.sensitive_calls:
+            node = self.parents.get(call)
+            while node is not None:
+                if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                    tools.add(node)
+                node = self.parents.get(node)
+        return tools
 
     def is_suppressed(self, rule: str, line: int) -> bool:
         """True if an `# agentgauge: ignore` comment on this line covers
@@ -415,13 +470,26 @@ def name_tokens(name: str) -> set[str]:
     return {t for t in re.split(r"[._]", name.lower()) if t}
 
 
-def is_tool_function(fn: FunctionNode, aliases: dict[str, str] | None = None) -> bool:
-    """A "tool function" is what per-function governance rules apply to:
-    either it is decorated as a tool (@mcp.tool(), @tool, ...) or it
-    performs a sensitive action itself."""
+def has_tool_decorator(
+    fn: FunctionNode, aliases: dict[str, str] | None = None
+) -> bool:
+    """True if any decorator names a tool (@mcp.tool(), @tool, @app.tool)."""
     for dec in fn.decorator_list:
         target = dec.func if isinstance(dec, ast.Call) else dec
         name = dotted_name(target, aliases)
         if name is not None and "tool" in name_tokens(name):
             return True
+    return False
+
+
+def is_tool_function(fn: FunctionNode, aliases: dict[str, str] | None = None) -> bool:
+    """A "tool function" is what per-function governance rules apply to:
+    either it is decorated as a tool (@mcp.tool(), @tool, ...) or it
+    performs a sensitive action itself.
+
+    Rules should prefer FileContext.tool_functions, which answers this for
+    every function in the file at once without re-walking subtrees.
+    test_astutils pins the two to the same answer."""
+    if has_tool_decorator(fn, aliases):
+        return True
     return next(iter_sensitive_calls(fn, aliases), None) is not None

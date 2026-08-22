@@ -11,8 +11,6 @@ import ast
 
 from agentgauge.astutils import (
     FileContext,
-    is_tool_function,
-    iter_functions,
     iter_identifiers,
 )
 from agentgauge.models import Finding
@@ -50,8 +48,8 @@ def check(ctx: FileContext) -> tuple[int, int, list[Finding]]:
     # it tests against, so an underscored config entry like "rate_limit"
     # still matches identifiers such as "rate_limit_check".
     extra_markers = tuple(m.replace("_", "") for m in ctx.config.rate_markers)
-    for fn in iter_functions(ctx.tree):
-        if not is_tool_function(fn, ctx.import_aliases):
+    for fn in ctx.functions:
+        if fn not in ctx.tool_functions:
             continue
         sites += 1
         if _mentions_rate_limit(fn, extra_markers):

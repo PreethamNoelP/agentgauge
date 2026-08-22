@@ -24,7 +24,6 @@ from agentgauge.astutils import (
     is_critical,
     iter_identifiers,
     iter_scope,
-    iter_sensitive_calls,
 )
 from agentgauge.models import Finding
 
@@ -80,7 +79,7 @@ def check(ctx: FileContext) -> tuple[int, int, list[Finding]]:
     # rule re-walks the whole scope per call, which is quadratic (a 800-call
     # module took ~6s before, ~0.05s after).
     signal_cache: dict[int, bool] = {}
-    for call, label in iter_sensitive_calls(ctx.tree, ctx.import_aliases):
+    for call, label in ctx.sensitive_calls:
         sites += 1
         fn = enclosing_function(call, ctx.parents)
         scope = fn if fn is not None else ctx.tree

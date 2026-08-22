@@ -10,7 +10,7 @@ Two kinds of sites feed this category:
 
 import ast
 
-from agentgauge.astutils import FileContext, call_name, iter_sensitive_calls
+from agentgauge.astutils import FileContext, call_name
 from agentgauge.models import Finding
 
 RULE_ID = "error-handling"
@@ -86,7 +86,7 @@ def check(ctx: FileContext) -> tuple[int, int, list[Finding]]:
             )
         )
 
-    for call, label in iter_sensitive_calls(ctx.tree, ctx.import_aliases):
+    for call, label in ctx.sensitive_calls:
         sites += 1
         if _in_try_body(call, ctx.parents):
             passed += 1

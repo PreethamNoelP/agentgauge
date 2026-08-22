@@ -14,8 +14,6 @@ from agentgauge.astutils import (
     FileContext,
     call_name,
     dotted_name,
-    is_tool_function,
-    iter_functions,
     name_tokens,
 )
 from agentgauge.models import Finding
@@ -42,32 +40,35 @@ VALIDATION_TOKENS = {
 }
 
 
-def _mentions(node: ast.AST, param: str) -> bool:
-    return any(isinstance(n, ast.Name) and n.id == param for n in ast.walk(node))
+def _names_in(node: ast.AST) -> set[str]:
+    return {n.id for n in ast.walk(node) if isinstance(n, ast.Name)}
 
 
-def _is_validated(
+def _validated_names(
     fn: ast.AST,
-    param: str,
     validation_tokens: frozenset[str],
     aliases: dict[str, str],
-) -> bool:
+) -> set[str]:
+    """Every name this function subjects to a validation construct: an
+    if/while/assert test that mentions it, or a call with validation
+    vocabulary that receives it.
+
+    Collected in one pass over the function and returned as a set, rather
+    than answered per parameter: a tool with three risky parameters used to
+    mean three full walks of the same body, and that was the single largest
+    cost in a scan.
+    """
+    validated: set[str] = set()
     for node in ast.walk(fn):
-        if isinstance(node, (ast.If, ast.While)) and _mentions(node.test, param):
-            return True
-        if isinstance(node, ast.Assert) and _mentions(node.test, param):
-            return True
-        if isinstance(node, ast.Call):
+        if isinstance(node, (ast.If, ast.While, ast.Assert)):
+            validated |= _names_in(node.test)
+        elif isinstance(node, ast.Call):
             # Alias-aware: `from utils import sanitize as scrub` should not
             # hide a recognized validator behind its local name.
             name = call_name(node, aliases)
-            if (
-                name is not None
-                and name_tokens(name) & validation_tokens
-                and _mentions(node, param)
-            ):
-                return True
-    return False
+            if name is not None and name_tokens(name) & validation_tokens:
+                validated |= _names_in(node)
+    return validated
 
 
 def _annotation_is_constrained(annotation: ast.expr | None) -> bool:
@@ -110,14 +111,16 @@ def check(ctx: FileContext) -> tuple[int, int, list[Finding]]:
     sites, passed, findings = 0, 0, []
     validation_tokens = VALIDATION_TOKENS | ctx.config.validation_tokens
     risky_param_tokens = RISKY_PARAM_TOKENS | ctx.config.risky_param_tokens
-    for fn in iter_functions(ctx.tree):
-        if not is_tool_function(fn, ctx.import_aliases):
+    for fn in ctx.functions:
+        if fn not in ctx.tool_functions:
             continue
-        for arg in _risky_params(fn, risky_param_tokens):
+        risky = list(_risky_params(fn, risky_param_tokens))
+        if not risky:
+            continue
+        validated = _validated_names(fn, validation_tokens, ctx.import_aliases)
+        for arg in risky:
             sites += 1
-            if _is_validated(
-                fn, arg.arg, validation_tokens, ctx.import_aliases
-            ) or _annotation_is_constrained(arg.annotation):
+            if arg.arg in validated or _annotation_is_constrained(arg.annotation):
                 passed += 1
                 continue
             findings.append(

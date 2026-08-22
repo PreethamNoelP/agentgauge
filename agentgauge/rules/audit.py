@@ -11,8 +11,6 @@ import ast
 from agentgauge.astutils import (
     FileContext,
     call_name,
-    is_tool_function,
-    iter_functions,
     name_tokens,
 )
 from agentgauge.models import Finding
@@ -41,8 +39,8 @@ def _makes_log_call(
 def check(ctx: FileContext) -> tuple[int, int, list[Finding]]:
     sites, passed, findings = 0, 0, []
     log_tokens = LOG_TOKENS | ctx.config.log_tokens
-    for fn in iter_functions(ctx.tree):
-        if not is_tool_function(fn, ctx.import_aliases):
+    for fn in ctx.functions:
+        if fn not in ctx.tool_functions:
             continue
         sites += 1
         if _makes_log_call(fn, log_tokens, ctx.import_aliases):
