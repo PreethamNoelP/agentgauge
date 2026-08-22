@@ -3,6 +3,12 @@ import pytest
 from agentgauge.config import Config, ConfigError, RuleConfig, load_config
 
 
+def load(tmp_path, toml: str) -> Config:
+    """Test helper: write a pyproject.toml next to the target and load it."""
+    (tmp_path / "pyproject.toml").write_text(toml)
+    return load_config(tmp_path)
+
+
 def test_missing_config_file_returns_all_defaults(tmp_path):
     config = load_config(tmp_path)
     assert config == Config()
@@ -113,3 +119,47 @@ def test_rule_config_defaults_are_all_empty():
     assert rules.assume_external_rate_limiting is False
     assert rules.approval_markers == ()
     assert rules.log_tokens == frozenset()
+
+
+# --- a config file that does not do what its author meant is an error ---
+
+def test_unknown_key_is_rejected(tmp_path):
+    # "excludes" instead of "exclude" used to scan with no excludes at all
+    # and say nothing. For a governance gate, silently different settings
+    # are worse than a failed invocation.
+    with pytest.raises(ConfigError) as exc:
+        load(tmp_path, "[tool.agentgauge]\nexcludes = ['tests/*']\n")
+    assert "unknown key" in str(exc.value)
+    assert "exclude" in str(exc.value)
+
+
+def test_unknown_disabled_rule_id_is_rejected(tmp_path):
+    with pytest.raises(ConfigError) as exc:
+        load(tmp_path, "[tool.agentgauge]\ndisabled_rules = ['rate_limiting']\n")
+    assert "unknown rule" in str(exc.value)
+    assert "rate-limiting" in str(exc.value)  # the error names the valid ids
+
+
+def test_known_disabled_rule_id_is_accepted(tmp_path):
+    config = load(tmp_path, "[tool.agentgauge]\ndisabled_rules = ['rate-limiting']\n")
+    assert config.rules.disabled_rules == frozenset({"rate-limiting"})
+
+
+def test_vocabulary_entry_shorter_than_three_characters_is_rejected(tmp_path):
+    # extra_approval_markers = ["e"] made every call name containing an "e"
+    # count as an approval check -- the critical gate turned off by config.
+    with pytest.raises(ConfigError) as exc:
+        load(tmp_path, "[tool.agentgauge]\nextra_approval_markers = ['e']\n")
+    assert "shorter than 3" in str(exc.value)
+
+
+def test_three_character_vocabulary_entry_is_accepted(tmp_path):
+    config = load(tmp_path, "[tool.agentgauge]\nextra_approval_markers = ['vet']\n")
+    assert config.rules.approval_markers == ("vet",)
+
+
+def test_boolean_min_score_is_rejected(tmp_path):
+    # bool is a subclass of int, so `min_score = true` silently became 1.0.
+    with pytest.raises(ConfigError) as exc:
+        load(tmp_path, "[tool.agentgauge]\nmin_score = true\n")
+    assert "must be a number" in str(exc.value)

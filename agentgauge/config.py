@@ -16,6 +16,8 @@ import tomllib
 from dataclasses import dataclass, field
 from pathlib import Path
 
+from agentgauge.rules import RULE_IDS
+
 # Recognized [tool.agentgauge] keys that extend a rule's built-in vocabulary,
 # additively -- a config can only add markers, never remove the defaults
 # documented in RULES.md.
@@ -30,6 +32,22 @@ _VOCAB_KEYS = {
 }
 
 _TUPLE_FIELDS = {"approval_markers", "rate_markers"}
+
+# Every key [tool.agentgauge] understands. An unrecognized key is an error,
+# not a no-op: "excludes = [...]" or "min_scores = 90" would otherwise scan
+# with silently different settings than the author believed they had asked
+# for, which for a governance gate is the worst possible failure mode.
+_KNOWN_KEYS = frozenset(
+    {"min_score", "exclude", "disabled_rules", "assume_external_rate_limiting"}
+    | set(_VOCAB_KEYS)
+)
+
+# Vocabulary entries are matched as substrings or stems, so a very short one
+# matches nearly every identifier: extra_approval_markers = ["e"] makes the
+# human-oversight rule pass on any call whose name contains an "e", which
+# turns the critical gate off through a config file. Three characters is
+# short enough for real words ("vet") and long enough not to be a wildcard.
+_MIN_VOCAB_LENGTH = 3
 
 
 class ConfigError(Exception):
@@ -67,11 +85,34 @@ def _as_str_tuple(value, key: str) -> tuple[str, ...]:
     return tuple(value)
 
 
+def _as_vocabulary(value, key: str) -> tuple[str, ...]:
+    """A vocabulary list, rejecting entries too short to be words. See
+    _MIN_VOCAB_LENGTH: a one- or two-character marker is a wildcard that
+    silently makes its rule pass everywhere."""
+    entries = _as_str_tuple(value, key)
+    for entry in entries:
+        stripped = entry.strip()
+        if len(stripped) < _MIN_VOCAB_LENGTH:
+            raise ConfigError(
+                f"[tool.agentgauge] '{key}' entry {entry!r} is shorter than "
+                f"{_MIN_VOCAB_LENGTH} characters -- it would match almost every "
+                "identifier and effectively disable the rule"
+            )
+    return entries
+
+
 def _build_rule_config(table: dict) -> RuleConfig:
     kwargs = {}
 
-    disabled = table.get("disabled_rules", [])
-    kwargs["disabled_rules"] = frozenset(_as_str_tuple(disabled, "disabled_rules"))
+    disabled = _as_str_tuple(table.get("disabled_rules", []), "disabled_rules")
+    unknown = sorted(set(disabled) - set(RULE_IDS))
+    if unknown:
+        raise ConfigError(
+            f"[tool.agentgauge] 'disabled_rules' names unknown rule(s) "
+            f"{', '.join(repr(u) for u in unknown)}; valid ids are "
+            f"{', '.join(RULE_IDS)}"
+        )
+    kwargs["disabled_rules"] = frozenset(disabled)
 
     assume_external = table.get("assume_external_rate_limiting", False)
     if not isinstance(assume_external, bool):
@@ -83,7 +124,7 @@ def _build_rule_config(table: dict) -> RuleConfig:
     for toml_key, field_name in _VOCAB_KEYS.items():
         if toml_key not in table:
             continue
-        values = _as_str_tuple(table[toml_key], toml_key)
+        values = _as_vocabulary(table[toml_key], toml_key)
         normalized = tuple(v.lower() for v in values)
         kwargs[field_name] = (
             normalized if field_name in _TUPLE_FIELDS else frozenset(normalized)
@@ -97,8 +138,20 @@ def _parse(data: dict) -> Config:
     if not isinstance(table, dict):
         raise ConfigError("[tool.agentgauge] must be a table")
 
+    unknown = sorted(set(table) - _KNOWN_KEYS)
+    if unknown:
+        raise ConfigError(
+            f"[tool.agentgauge] unknown key(s) "
+            f"{', '.join(repr(u) for u in unknown)}; valid keys are "
+            f"{', '.join(sorted(_KNOWN_KEYS))}"
+        )
+
     min_score = table.get("min_score")
-    if min_score is not None and not isinstance(min_score, (int, float)):
+    # bool is a subclass of int in Python, so `min_score = true` would
+    # otherwise silently become a threshold of 1.0.
+    if min_score is not None and (
+        isinstance(min_score, bool) or not isinstance(min_score, (int, float))
+    ):
         raise ConfigError("[tool.agentgauge] 'min_score' must be a number")
 
     exclude = _as_str_tuple(table.get("exclude", []), "exclude")
