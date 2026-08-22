@@ -141,7 +141,12 @@ def _emit(report: ScanReport, args, config_source: str | None) -> None:
             return
         _print_warnings(report)
     except BrokenPipeError:
-        os.dup2(os.open(os.devnull, os.O_WRONLY), sys.stdout.fileno())
+        try:
+            os.dup2(os.open(os.devnull, os.O_WRONLY), sys.stdout.fileno())
+        except (OSError, ValueError, AttributeError):
+            # No real file descriptor behind stdout (a captured or wrapped
+            # stream). Nothing to redirect, and nothing left to flush.
+            pass
 
 
 def main(argv: list[str] | None = None) -> int:

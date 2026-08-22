@@ -3,6 +3,7 @@ import json
 import pytest
 
 from agentgauge import __version__
+from agentgauge import cli
 from agentgauge.cli import _print_report, main
 from agentgauge.models import CategoryResult, Finding
 from agentgauge.scoring import ScanReport
@@ -287,3 +288,45 @@ def test_scan_with_no_applicable_sites_says_so(tmp_path, capsys):
     assert code == 0
     assert "100.0 / 100" in captured.out
     assert "absence of anything to check" in captured.err
+
+
+def _break_the_pipe(monkeypatch):
+    """Make every print in cli.py raise BrokenPipeError, the way a closed
+    pipe does, without touching the real stdout descriptor pytest is using.
+    A module-level `print` shadows the builtin for that module only."""
+    def exploding_print(*_args, **_kwargs):
+        raise BrokenPipeError
+
+    monkeypatch.setattr(cli, "print", exploding_print, raising=False)
+    redirected = []
+    monkeypatch.setattr(cli.os, "dup2", lambda *a: redirected.append(a))
+    return redirected
+
+
+def test_closed_stdout_pipe_does_not_break_the_exit_code(tmp_path, monkeypatch):
+    # `agentgauge . --json | head -1` closes the pipe mid-write. That is a
+    # consumer finishing early, not a scan failure, so the exit code must
+    # still reflect the governance result.
+    (tmp_path / "bad.py").write_text(
+        "import shutil\ndef wipe(path):\n    shutil.rmtree(path)\n"
+    )
+    redirected = _break_the_pipe(monkeypatch)
+
+    assert main([str(tmp_path), "--json"]) == 1
+    assert redirected  # stdout was pointed at the null device
+
+
+def test_closed_stdout_pipe_on_the_human_report_is_also_survivable(
+    tmp_path, monkeypatch
+):
+    (tmp_path / "ok.py").write_text("auto_approve = False\n")
+    _break_the_pipe(monkeypatch)
+
+    assert main([str(tmp_path)]) == 0
+
+
+def test_closed_stdout_pipe_on_sarif_is_survivable(tmp_path, monkeypatch):
+    (tmp_path / "ok.py").write_text("auto_approve = True\n")
+    _break_the_pipe(monkeypatch)
+
+    assert main([str(tmp_path), "--sarif"]) == 0
