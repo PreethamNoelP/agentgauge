@@ -2,7 +2,10 @@ import json
 
 import pytest
 
-from agentgauge.cli import main
+from agentgauge import __version__
+from agentgauge.cli import _print_report, main
+from agentgauge.models import CategoryResult, Finding
+from agentgauge.scoring import ScanReport
 
 
 def test_clean_scan_prints_score_and_exits_zero(tmp_path, capsys):
@@ -165,3 +168,122 @@ def test_inline_suppression_is_reflected_in_output(tmp_path, capsys):
     assert code == 0
     assert "100.0 / 100" in out
     assert "1 finding(s) suppressed" in out
+
+
+def test_version_flag_prints_the_version(capsys):
+    with pytest.raises(SystemExit) as exc_info:
+        main(["--version"])
+
+    assert exc_info.value.code == 0
+    assert __version__ in capsys.readouterr().out
+
+
+def test_fail_on_incomplete_turns_a_partial_scan_red(tmp_path, capsys):
+    # A file agentgauge could not parse is a hole in its coverage; a repo
+    # that wants CI to reflect that can now say so.
+    (tmp_path / "ok.py").write_text("x = 1\n")
+    (tmp_path / "broken.py").write_text("def broken(:\n")
+
+    assert main([str(tmp_path)]) == 0
+    assert main([str(tmp_path), "--fail-on-incomplete"]) == 1
+    assert "INCOMPLETE" in capsys.readouterr().out
+
+
+def test_fail_on_incomplete_does_not_affect_a_complete_scan(tmp_path):
+    (tmp_path / "ok.py").write_text("auto_approve = False\n")
+
+    assert main([str(tmp_path), "--fail-on-incomplete"]) == 0
+
+
+def test_disabled_gate_rule_is_warned_about_and_not_a_pass(tmp_path, capsys):
+    (tmp_path / "pyproject.toml").write_text(
+        "[tool.agentgauge]\ndisabled_rules = ['human-oversight']\n"
+    )
+    (tmp_path / "server.py").write_text(
+        "import shutil\ndef wipe(path):\n    shutil.rmtree(path)\n"
+    )
+
+    code = main([str(tmp_path), "--fail-on-incomplete"])
+
+    captured = capsys.readouterr()
+    assert code == 1
+    assert "INCOMPLETE" in captured.out
+    assert "FAIL_CRITICAL gate" in captured.err
+
+
+def test_config_source_is_reported_so_an_ignored_config_is_visible(tmp_path, capsys):
+    (tmp_path / "pyproject.toml").write_text("[tool.agentgauge]\nmin_score = 1\n")
+    (tmp_path / "server.py").write_text("x = 1\n")
+
+    main([str(tmp_path)])
+
+    assert "config: " in capsys.readouterr().out
+
+
+def test_no_config_source_line_when_no_config_applies(tmp_path, capsys):
+    (tmp_path / "server.py").write_text("x = 1\n")
+
+    main([str(tmp_path)])
+
+    assert "config: " not in capsys.readouterr().out
+
+
+def test_json_output_carries_the_config_source(tmp_path, capsys):
+    (tmp_path / "pyproject.toml").write_text("[tool.agentgauge]\nmin_score = 1\n")
+    (tmp_path / "server.py").write_text("x = 1\n")
+
+    main([str(tmp_path), "--json"])
+
+    data = json.loads(capsys.readouterr().out)
+    assert data["config_source"].endswith("pyproject.toml")
+
+
+def test_control_characters_in_output_are_defanged(capsys):
+    # File names are attacker-controlled on a scanned repo (a newline or an
+    # ANSI escape is a legal POSIX filename), and they reach the terminal
+    # verbatim. A path must not be able to repaint the report around it.
+    escape = chr(27)
+    report = ScanReport(categories=[], files_scanned=1)
+    report.categories.append(
+        CategoryResult(
+            name="Permissive defaults",
+            weight=10,
+            sites=1,
+            findings=[
+                Finding(
+                    rule="permissive-defaults",
+                    file=f"evil{escape}[2Jname.py",
+                    line=1,
+                    message="permissive default",
+                    fix="flip it",
+                )
+            ],
+        )
+    )
+
+    _print_report(report, f"target{escape}[2J", None)
+
+    out = capsys.readouterr().out
+    assert escape not in out
+    assert "\\x1b[2Jname.py" in out
+
+
+def test_unknown_config_key_is_a_usage_error(tmp_path, capsys):
+    (tmp_path / "pyproject.toml").write_text("[tool.agentgauge]\nexcludes = ['x']\n")
+    (tmp_path / "server.py").write_text("x = 1\n")
+
+    code = main([str(tmp_path)])
+
+    assert code == 2
+    assert "unknown key" in capsys.readouterr().err
+
+
+def test_scan_with_no_applicable_sites_says_so(tmp_path, capsys):
+    (tmp_path / "server.py").write_text("def add(a, b):\n    return a + b\n")
+
+    code = main([str(tmp_path)])
+
+    captured = capsys.readouterr()
+    assert code == 0
+    assert "100.0 / 100" in captured.out
+    assert "absence of anything to check" in captured.err

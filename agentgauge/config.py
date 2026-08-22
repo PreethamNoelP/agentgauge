@@ -77,6 +77,11 @@ class Config:
     min_score: float | None = None
     exclude: tuple[str, ...] = ()
     rules: RuleConfig = field(default_factory=RuleConfig)
+    # The file these settings came from, or None when no config was found.
+    # Reported by the CLI: "my [tool.agentgauge] table was ignored" is
+    # otherwise invisible, and discovery deliberately does not search
+    # upwards (see _discover_path).
+    source: str | None = None
 
 
 def _as_str_tuple(value, key: str) -> tuple[str, ...]:
@@ -133,10 +138,15 @@ def _build_rule_config(table: dict) -> RuleConfig:
     return RuleConfig(**kwargs)
 
 
-def _parse(data: dict) -> Config:
-    table = data.get("tool", {}).get("agentgauge", {})
+def _parse(data: dict, source: str | None = None) -> Config:
+    tool = data.get("tool", {})
+    table = tool.get("agentgauge", {}) if isinstance(tool, dict) else {}
     if not isinstance(table, dict):
         raise ConfigError("[tool.agentgauge] must be a table")
+    if not isinstance(tool, dict) or "agentgauge" not in tool:
+        # A pyproject.toml with no [tool.agentgauge] table contributed
+        # nothing, so naming it as the config source would be misleading.
+        source = None
 
     unknown = sorted(set(table) - _KNOWN_KEYS)
     if unknown:
@@ -160,6 +170,7 @@ def _parse(data: dict) -> Config:
         min_score=float(min_score) if min_score is not None else None,
         exclude=exclude,
         rules=_build_rule_config(table),
+        source=source,
     )
 
 
@@ -188,6 +199,6 @@ def load_config(target: Path, explicit_path: Path | None = None) -> Config:
     except tomllib.TOMLDecodeError as exc:
         raise ConfigError(f"invalid TOML in {path}: {exc}") from exc
     try:
-        return _parse(data)
+        return _parse(data, source=path.as_posix())
     except ConfigError as exc:
         raise ConfigError(f"{path}: {exc}") from exc
