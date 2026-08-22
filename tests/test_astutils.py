@@ -355,3 +355,48 @@ def test_trailing_reason_after_a_rule_list_still_parses():
     )
     assert ctx.is_suppressed("human-oversight", 1) is True
     assert ctx.is_suppressed("error-handling", 1) is False
+
+
+# --- rebinding an import to another name ---
+
+def test_build_import_aliases_resolves_a_rebound_import():
+    tree = ast.parse("import subprocess\nrun = subprocess.run\n")
+    assert build_import_aliases(tree)["run"] == "subprocess.run"
+
+
+def test_build_import_aliases_resolves_a_rebinding_through_an_alias():
+    tree = ast.parse("import subprocess as sp\nrun = sp.run\n")
+    assert build_import_aliases(tree)["run"] == "subprocess.run"
+
+
+def test_rebound_sink_is_detected():
+    # rm = shutil.rmtree; rm(path) -- a normal refactor, and the cheapest
+    # way to walk a sink past a name-based scan.
+    tree = ast.parse("import shutil\nrm = shutil.rmtree\nrm(path)\n")
+    aliases = build_import_aliases(tree)
+    assert [label for _, label in iter_sensitive_calls(tree, aliases)] == ["file delete"]
+
+
+def test_call_result_assignment_is_not_an_alias():
+    # logger = logging.getLogger(__name__) names nothing static; treating
+    # it as an alias would be a guess, not a resolution.
+    tree = ast.parse("import logging\nlogger = logging.getLogger(__name__)\n")
+    assert "logger" not in build_import_aliases(tree)
+
+
+def test_an_import_wins_over_a_later_assignment_to_the_same_name():
+    tree = ast.parse("from shutil import rmtree\nrmtree = something.else_\n")
+    assert build_import_aliases(tree)["rmtree"] == "shutil.rmtree"
+
+
+def test_self_referential_assignment_is_not_an_alias():
+    tree = ast.parse("run = run\n")
+    assert build_import_aliases(tree) == {}
+
+
+def test_multi_target_assignment_is_not_an_alias():
+    # a = b = os.remove: which name is the alias is ambiguous enough that
+    # guessing is worse than missing it.
+    tree = ast.parse("import os\na = b = os.remove\n")
+    aliases = build_import_aliases(tree)
+    assert "a" not in aliases and "b" not in aliases

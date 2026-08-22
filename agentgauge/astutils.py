@@ -218,6 +218,17 @@ def build_import_aliases(tree: ast.AST) -> dict[str, str]:
     (`from . import x`) are skipped -- their target isn't a static dotted
     name we could resolve to.
 
+    Rebinding an import to another name is also resolved, because
+    `rm = shutil.rmtree; rm(path)` is both a normal refactor and the
+    cheapest way to walk a sink past a name-based scan:
+
+        run = subprocess.run     ->  {"run": "subprocess.run"}
+        Path = pathlib.Path      ->  {"Path": "pathlib.Path"}
+
+    Only assignments whose value is itself a static dotted name count; a
+    call result (`logger = logging.getLogger(__name__)`) names nothing we
+    could resolve, and a second layer of indirection is still missed.
+
     Scope-blind by design: this is one flat map per file, so a local
     variable that shadows an imported name still resolves to the import
     (documented in RULES.md).
@@ -236,6 +247,18 @@ def build_import_aliases(tree: ast.AST) -> dict[str, str]:
                     continue
                 local = alias.asname if alias.asname is not None else alias.name
                 aliases[local] = f"{node.module}.{alias.name}"
+    # Second pass: imports are collected first so a rebinding can resolve
+    # through them (`import subprocess as sp` then `run = sp.run`), and so
+    # an import always wins over an assignment to the same name.
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Assign) or len(node.targets) != 1:
+            continue
+        target = node.targets[0]
+        if not isinstance(target, ast.Name) or target.id in aliases:
+            continue
+        resolved = dotted_name(node.value, aliases)
+        if resolved is not None and resolved != target.id:
+            aliases[target.id] = resolved
     return aliases
 
 
