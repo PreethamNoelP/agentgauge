@@ -5,6 +5,20 @@ on:
     branches: [main]
   pull_request:
 
+# This workflow triggers on pull_request, so it runs code from any fork.
+# GitHub already scopes GITHUB_TOKEN to read-only for fork PRs and withholds
+# secrets, but inheriting that from a repository setting means the guarantee
+# can be changed elsewhere without anyone remembering it applied here.
+# Declared at the top level so every job starts from least privilege; a job
+# that ever needs more has to say so, visibly, in the diff.
+permissions:
+  contents: read
+
+# Third-party actions are pinned to commit SHAs, not to major tags. A tag is
+# a movable label: actions/checkout@v4 is whatever that label points at
+# today, so a compromise of the action's repo would reach this workflow on
+# its next run with no change here. The trailing comment keeps it readable;
+# Dependabot (.github/dependabot.yml) bumps both the SHA and the comment.
 jobs:
   test:
     runs-on: ${{ matrix.os }}
@@ -17,9 +31,9 @@ jobs:
         os: [ubuntu-latest, windows-latest]
         python-version: ["3.11", "3.12", "3.13"]
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
 
-      - uses: actions/setup-python@v5
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5.6.0
         with:
           python-version: ${{ matrix.python-version }}
 
@@ -36,8 +50,8 @@ jobs:
     # machine-readable outputs actually parse.
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5.6.0
         with:
           python-version: "3.12"
       - run: pip install -e .

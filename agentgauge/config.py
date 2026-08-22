@@ -12,6 +12,7 @@ Two independent concerns are split into two dataclasses:
     path excludes) and is consumed by scanner.py / cli.py, never by a rule.
 """
 
+import os
 import tomllib
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -80,7 +81,8 @@ class Config:
     # The file these settings came from, or None when no config was found.
     # Reported by the CLI: "my [tool.agentgauge] table was ignored" is
     # otherwise invisible, and discovery deliberately does not search
-    # upwards (see _discover_path).
+    # upwards (see _discover_path). Named by display_path, so it never
+    # carries an absolute path into a CI log.
     source: str | None = None
 
 
@@ -184,6 +186,24 @@ def _discover_path(target: Path) -> Path | None:
     return candidate if candidate.is_file() else None
 
 
+def display_path(path: Path) -> str:
+    """How a config file's location is named in output.
+
+    Relative to the working directory when the file is under it, absolute
+    otherwise. Both the reported config source and every ConfigError go
+    through this: an absolute path in a CI log discloses the runner's (or a
+    developer's) directory layout for no benefit, and it makes the same
+    commit produce different output on different machines. os.path.abspath
+    rather than Path.resolve() so a symlinked checkout is named the way the
+    caller spelled it.
+    """
+    absolute = Path(os.path.abspath(path))
+    try:
+        return absolute.relative_to(Path(os.path.abspath(os.curdir))).as_posix()
+    except ValueError:
+        return absolute.as_posix()
+
+
 def load_config(target: Path, explicit_path: Path | None = None) -> Config:
     """Load [tool.agentgauge] from an explicit path or by discovery next to
     `target`. Returns the all-defaults Config if nothing is found -- a
@@ -191,14 +211,15 @@ def load_config(target: Path, explicit_path: Path | None = None) -> Config:
     path = explicit_path if explicit_path is not None else _discover_path(target)
     if path is None:
         return Config()
+    shown = display_path(path)
     if not path.is_file():
-        raise ConfigError(f"config file not found: {path}")
+        raise ConfigError(f"config file not found: {shown}")
     try:
         with path.open("rb") as fh:
             data = tomllib.load(fh)
     except tomllib.TOMLDecodeError as exc:
-        raise ConfigError(f"invalid TOML in {path}: {exc}") from exc
+        raise ConfigError(f"invalid TOML in {shown}: {exc}") from exc
     try:
-        return _parse(data, source=path.as_posix())
+        return _parse(data, source=shown)
     except ConfigError as exc:
-        raise ConfigError(f"{path}: {exc}") from exc
+        raise ConfigError(f"{shown}: {exc}") from exc

@@ -1,0 +1,24 @@
+version: 2
+
+# Pinning actions to commit SHAs (see ci.yml) trades a supply-chain risk for
+# a staleness risk: nothing tells you when a pinned action has shipped a
+# security fix. Dependabot closes that loop -- it bumps both the SHA and the
+# trailing version comment, as a reviewable PR rather than silently on the
+# next run.
+updates:
+  - package-ecosystem: github-actions
+    directory: "/"
+    schedule:
+      interval: monthly
+    commit-message:
+      prefix: "ci"
+
+  # agentgauge has no runtime dependencies and is meant to keep it that way,
+  # so this watches exactly two things: the dev-only pytest pin and the
+  # setuptools build requirement.
+  - package-ecosystem: pip
+    directory: "/"
+    schedule:
+      interval: monthly
+    commit-message:
+      prefix: "build"

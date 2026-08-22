@@ -163,3 +163,69 @@ def test_boolean_min_score_is_rejected(tmp_path):
     with pytest.raises(ConfigError) as exc:
         load(tmp_path, "[tool.agentgauge]\nmin_score = true\n")
     assert "must be a number" in str(exc.value)
+
+
+# --- config paths in output must not disclose the machine's layout ---
+
+def test_config_source_is_relative_to_the_working_directory(tmp_path, monkeypatch):
+    # An absolute path in a CI log discloses the runner's (or a developer's)
+    # directory layout for no benefit, and makes the same commit produce
+    # different output on different machines.
+    (tmp_path / "pyproject.toml").write_text("[tool.agentgauge]\nmin_score = 50\n")
+    monkeypatch.chdir(tmp_path)
+
+    config = load_config(tmp_path.absolute())
+
+    assert config.source == "pyproject.toml"
+
+
+def test_config_source_in_a_subdirectory_keeps_its_relative_prefix(
+    tmp_path, monkeypatch
+):
+    (tmp_path / "sub").mkdir()
+    (tmp_path / "sub" / "pyproject.toml").write_text(
+        "[tool.agentgauge]\nmin_score = 50\n"
+    )
+    monkeypatch.chdir(tmp_path)
+
+    config = load_config(tmp_path / "sub")
+
+    assert config.source == "sub/pyproject.toml"
+
+
+def test_config_error_names_the_file_relatively(tmp_path, monkeypatch):
+    (tmp_path / "pyproject.toml").write_text("[tool.agentgauge\nmin_score = 1\n")
+    monkeypatch.chdir(tmp_path)
+
+    with pytest.raises(ConfigError) as exc:
+        load_config(tmp_path.absolute())
+
+    message = str(exc.value)
+    assert "pyproject.toml" in message
+    assert str(tmp_path) not in message
+
+
+def test_validation_error_also_names_the_file_relatively(tmp_path, monkeypatch):
+    (tmp_path / "pyproject.toml").write_text("[tool.agentgauge]\nexcludes = ['x']\n")
+    monkeypatch.chdir(tmp_path)
+
+    with pytest.raises(ConfigError) as exc:
+        load_config(tmp_path.absolute())
+
+    assert str(tmp_path) not in str(exc.value)
+
+
+def test_config_outside_the_working_directory_stays_absolute(tmp_path, monkeypatch):
+    # There is no shorter honest way to name it, and the caller passed this
+    # path explicitly with --config, so it is their own path either way.
+    outside = tmp_path / "elsewhere"
+    outside.mkdir()
+    (outside / "custom.toml").write_text("[tool.agentgauge]\nmin_score = 50\n")
+    cwd = tmp_path / "cwd"
+    cwd.mkdir()
+    monkeypatch.chdir(cwd)
+
+    config = load_config(cwd, outside / "custom.toml")
+
+    assert config.source.endswith("elsewhere/custom.toml")
+    assert config.source.startswith(("/", tmp_path.drive or "/"))
