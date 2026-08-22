@@ -175,11 +175,18 @@ def sensitive_label(call: ast.Call, aliases: dict[str, str] | None = None) -> st
     """Action label ("file delete", "shell exec", ...) if this call looks
     sensitive, else None. Exact table first, then the suffix table."""
     name = call_name(call, aliases)
-    if name is None:
-        return None
-    if name in SENSITIVE_EXACT:
-        return SENSITIVE_EXACT[name]
-    return SENSITIVE_SUFFIX.get(name.rsplit(".", 1)[-1])
+    if name is not None:
+        if name in SENSITIVE_EXACT:
+            return SENSITIVE_EXACT[name]
+        return SENSITIVE_SUFFIX.get(name.rsplit(".", 1)[-1])
+    # dotted_name gave up because the receiver is dynamic
+    # (Path(p).unlink(), clients[key].charge()). The suffix table is
+    # receiver-agnostic by construction -- the method name alone is the
+    # whole signal -- so it still applies. The exact table does not: it
+    # exists precisely to require a known module chain.
+    if isinstance(call.func, ast.Attribute):
+        return SENSITIVE_SUFFIX.get(call.func.attr)
+    return None
 
 
 def iter_sensitive_calls(tree: ast.AST, aliases: dict[str, str] | None = None):
@@ -192,14 +199,28 @@ def iter_sensitive_calls(tree: ast.AST, aliases: dict[str, str] | None = None):
 
 
 def build_import_aliases(tree: ast.AST) -> dict[str, str]:
-    """Map every `as`-aliased import to what it actually names, so
-    `import subprocess as sp; sp.run(...)` and
-    `from shutil import rmtree as rt; rt(...)` resolve to "subprocess.run"
-    and "shutil.rmtree" respectively instead of vanishing behind the alias
-    (a documented blind spot -- see RULES.md). Only `as` imports are
-    collected: a plain `import os.path` needs no alias, dotted_name already
-    walks its Attribute chain. Relative `from . import x as y` is skipped --
-    its target isn't a static dotted name we could resolve to anyway."""
+    """Map every locally-bound import name to the dotted name it actually
+    refers to, so a call written through an import binding resolves to its
+    canonical target instead of vanishing behind the local spelling:
+
+        import subprocess as sp   ->  {"sp": "subprocess"}
+        from shutil import rmtree ->  {"rmtree": "shutil.rmtree"}
+        from os import system as s ->  {"s": "os.system"}
+
+    `from X import y` matters as much as the `as` form: `from subprocess
+    import run; run(cmd, shell=True)` resolves to nothing but the bare name
+    "run", which the suffix table deliberately excludes as too generic --
+    so without this mapping that call was invisible entirely.
+
+    A plain `import os.path` needs no entry: it binds "os", and dotted_name
+    already walks the Attribute chain from there. Relative imports
+    (`from . import x`) are skipped -- their target isn't a static dotted
+    name we could resolve to.
+
+    Scope-blind by design: this is one flat map per file, so a local
+    variable that shadows an imported name still resolves to the import
+    (documented in RULES.md).
+    """
     aliases: dict[str, str] = {}
     for node in ast.walk(tree):
         if isinstance(node, ast.Import):
@@ -210,8 +231,10 @@ def build_import_aliases(tree: ast.AST) -> dict[str, str]:
             if node.module is None or node.level:
                 continue
             for alias in node.names:
-                if alias.asname is not None:
-                    aliases[alias.asname] = f"{node.module}.{alias.name}"
+                if alias.name == "*":
+                    continue
+                local = alias.asname if alias.asname is not None else alias.name
+                aliases[local] = f"{node.module}.{alias.name}"
     return aliases
 
 

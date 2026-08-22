@@ -105,10 +105,24 @@ def test_build_import_aliases_maps_from_import_asname():
     assert build_import_aliases(tree) == {"rt": "shutil.rmtree"}
 
 
-def test_build_import_aliases_ignores_unaliased_imports():
-    # `import os.path` and `from shutil import rmtree` need no alias entry:
-    # dotted_name already walks the plain Attribute chain / bare Name.
-    tree = ast.parse("import os.path\nfrom shutil import rmtree\n")
+def test_build_import_aliases_maps_plain_from_import():
+    # `from subprocess import run` binds the bare name "run", which the
+    # suffix table excludes as too generic -- without this entry the call
+    # `run(cmd, shell=True)` resolved to nothing at all.
+    tree = ast.parse("from subprocess import run\n")
+    assert build_import_aliases(tree) == {"run": "subprocess.run"}
+
+
+def test_build_import_aliases_ignores_plain_module_import():
+    # `import os.path` binds "os"; dotted_name already walks the Attribute
+    # chain from there, so no entry is needed.
+    tree = ast.parse("import os.path\n")
+    assert build_import_aliases(tree) == {}
+
+
+def test_build_import_aliases_skips_star_import():
+    # `from subprocess import *` binds names we cannot enumerate statically.
+    tree = ast.parse("from subprocess import *\n")
     assert build_import_aliases(tree) == {}
 
 
@@ -241,3 +255,32 @@ def test_generic_delete_is_still_not_flagged():
     # removal is not a governance event.
     assert sensitive_label(first_call("cache.delete(key)")) is None
     assert sensitive_label(first_call("items.remove(x)")) is None
+
+
+def test_sensitive_label_sees_through_plain_from_import():
+    # from os import system; system(cmd) -- the bare name "system" is
+    # deliberately absent from the suffix table (platform.system and
+    # friends), so only alias resolution can catch this shape.
+    tree = ast.parse("from os import system\nsystem(cmd)\n")
+    aliases = build_import_aliases(tree)
+    assert [label for _, label in iter_sensitive_calls(tree, aliases)] == ["shell exec"]
+
+
+def test_plain_from_import_of_subprocess_run_is_detected():
+    tree = ast.parse("from subprocess import run\nrun(cmd, shell=True)\n")
+    aliases = build_import_aliases(tree)
+    assert [label for _, label in iter_sensitive_calls(tree, aliases)] == ["shell exec"]
+
+
+def test_suffix_table_matches_through_a_dynamic_receiver():
+    # dotted_name gives up on Path(p).unlink -- the receiver is a call
+    # result, not a name chain. The suffix table is receiver-agnostic by
+    # construction, so the attribute name alone must still be honored.
+    assert sensitive_label(first_call("Path(p).unlink()")) == "file delete"
+    assert sensitive_label(first_call("clients[k].charge(n)")) == "payment"
+
+
+def test_dynamic_receiver_fallback_stays_suffix_only():
+    # The fallback must not promote a generic method name; only the
+    # distinctive suffix table applies.
+    assert sensitive_label(first_call("get_db().delete(row)")) is None
