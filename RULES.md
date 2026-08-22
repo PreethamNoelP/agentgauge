@@ -42,14 +42,40 @@ Category points = `weight × passed / sites`. Consequences:
    claims to cover. `INCOMPLETE` exits 0 by default; pass
    `--fail-on-incomplete` to make CI treat reduced coverage as a failure.
 
-| Category | Weight | Sites are... |
-|---|---|---|
-| Human oversight | 25 | sensitive calls |
-| Audit logging | 20 | tool functions |
-| Rate limiting | 15 | tool functions |
-| Error handling | 15 | `while True` loops + sensitive calls |
-| Tool scope & input validation | 15 | risky params of tool functions |
-| Permissive defaults | 10 | governance-flag bindings |
+| Category | Weight | Sites are... | Evidence is... |
+|---|---|---|---|
+| Human oversight | 25 | sensitive calls | vocabulary in an enforcing position |
+| Audit logging | 20 | tool functions | vocabulary |
+| Rate limiting | 15 | tool functions | vocabulary |
+| Error handling | 15 | `while True` loops + sensitive calls | AST structure |
+| Tool scope & input validation | 15 | risky params of tool functions | vocabulary + annotations |
+| Permissive defaults | 10 | governance-flag bindings | literal values |
+
+### How much should you trust the number?
+
+Read that last column before putting a threshold on the score. Only rule 4
+proves anything structurally; rule 6 reads literal values, which is nearly
+as solid. Rules 2, 3 and 5 — 50 of the 100 points — are asking whether
+governance *vocabulary* appears near a tool function. A file that mentions
+`rate_limiter` without using it, or calls `logger.info("hi")` and nothing
+else, scores exactly as well as one that does the job properly.
+
+That is a real ceiling on what the score means, and it is why agentgauge
+produces a verdict as well as a number:
+
+- **The verdict is the load-bearing output.** `FAIL_CRITICAL` says
+  agentgauge found a specific catastrophic action with no approval gate in
+  its own scope. That is a concrete claim about a concrete line, and it is
+  what belongs in a CI gate.
+- **The score is a trend line, not an audit result.** It is useful for
+  "is this getting better or worse", for comparing modules, and for setting
+  a floor a team agrees on. It is not evidence that a codebase is governed,
+  and a 100/100 is not a certification. Nothing here replaces reading the
+  code.
+- **The weights are considered judgement, not calibration.** 25/20/15/15/
+  15/10 reflects how much each control matters when it is missing entirely;
+  no dataset was used to fit them. They are stable so that scores are
+  comparable over time, not because they are provably right.
 
 ## Shared machinery
 
@@ -388,6 +414,13 @@ against the path relative to the scan root:
 
 An explicitly named single-file target is always scanned: exclude patterns
 filter a directory walk, they do not overrule the file you asked for.
+
+An excluded file is not scanned at all, so its findings — **including
+critical ones** — do not exist as far as the verdict is concerned. That is
+the point of an exclude, and it is also the bluntest way to make this tool
+say nothing. `files_scanned` and the applied config file are both in every
+report; if you are reviewing someone else's `agentgauge` result, read their
+`exclude` list first.
 
 **`disabled_rules`** removes a category from the scan entirely — `max_score`
 in the report drops below 100 rather than the remaining categories silently
