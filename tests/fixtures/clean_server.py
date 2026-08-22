@@ -6,11 +6,15 @@ legitimate governance patterns below, that rule has developed a false
 positive and this fixture catches it.
 """
 
+import asyncio
 import shlex
 import shutil
 import subprocess
+from pathlib import Path
+from typing import Annotated, Literal
 
 require_approval = True
+SETTINGS = {"skip_confirmation": False, "human_in_the_loop": True}
 
 SAFE_ROOT = "/workspaces/"
 ALLOWED_COMMANDS = {"ls", "cat", "echo"}
@@ -46,6 +50,38 @@ def run_command(cmd):
         return False
     audit_log("run_command", cmd)
     return result
+
+
+@mcp.tool()
+async def run_async(cmd: Annotated[str, Field(pattern=r"^[a-z]+$")]):
+    """A governed async tool: the asyncio sink is as gated as the blocking
+    one, and the parameter's constraint lives in its annotation."""
+    if not await request_approval("run_async", cmd):
+        return None
+    await rate_limiter.acquire()
+    try:
+        proc = await asyncio.create_subprocess_exec(cmd)
+    except OSError as exc:
+        logger.error("spawn failed: %s", exc)
+        return None
+    audit_log("run_async", cmd)
+    return proc
+
+
+@mcp.tool()
+def remove_artifact(target: Literal["build", "dist"]):
+    """Deletion through pathlib, with the target restricted by type to a
+    closed set of values -- no runtime check needed or possible to add."""
+    if not request_approval("remove_artifact", target):
+        return False
+    throttle.wait()
+    try:
+        Path(SAFE_ROOT, target).unlink()
+    except OSError as exc:
+        logger.error("unlink failed: %s", exc)
+        return False
+    audit_log("remove_artifact", target)
+    return True
 
 
 def watch_queue():

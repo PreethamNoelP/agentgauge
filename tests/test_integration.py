@@ -76,3 +76,34 @@ def test_critical_verdict_fails_end_to_end_without_min_score():
     )
     assert proc.returncode == 1
     assert "FAIL_CRITICAL" in proc.stdout
+
+
+def test_vulnerable_fixture_covers_every_detection_shape():
+    # Each shape below is one a previous version of agentgauge scored as
+    # clean. Pinning them here means a regression fails the fixture gate
+    # in CI, not just a unit test someone might delete.
+    report = scan(FIXTURES / "vulnerable_server.py")
+    messages = " ".join(f.message for f in report.findings)
+
+    for expected in [
+        "subprocess.run",                    # plain dotted sink
+        "subprocess.check_call",             # module-level sink
+        "shutil.rmtree",                     # rebound sink (rm = shutil.rmtree)
+        "unlink",                            # pathlib, dynamic receiver
+        "asyncio.create_subprocess_shell",   # async sink
+        "pickle.loads",                      # deserialization
+        "eval",                              # code exec
+        "at module level",                   # scope-limited approval check
+    ]:
+        assert expected in messages, expected
+
+
+def test_clean_fixture_exercises_every_category():
+    # A false-positive canary is only worth having if every rule actually
+    # gets a chance to fire on it.
+    report = scan(FIXTURES / "clean_server.py")
+
+    assert report.findings == []
+    assert all(c.sites > 0 for c in report.categories), [
+        c.name for c in report.categories if c.sites == 0
+    ]
