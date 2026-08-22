@@ -107,3 +107,14 @@ def test_aliased_import_sensitive_call_is_still_a_site():
     )
     assert (sites, passed) == (1, 0)
     assert "subprocess.run" in findings[0].message
+
+
+def test_aliased_sys_exit_counts_as_a_loop_exit():
+    sites, passed, findings = run(
+        "import sys as s\n"
+        "def poll():\n"
+        "    while True:\n"
+        "        if done():\n"
+        "            s.exit(0)\n"
+    )
+    assert (sites, passed) == (1, 1)

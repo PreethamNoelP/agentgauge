@@ -68,3 +68,17 @@ def test_extra_log_token_from_config_is_recognized():
         config=config,
     )
     assert (sites, passed) == (1, 1)
+
+
+def test_aliased_log_helper_still_counts():
+    # `from telemetry import audit_log as al` leaves the local call spelled
+    # `al(...)`, which carries none of the vocabulary the rule matches on.
+    sites, passed, findings = run(
+        "from telemetry import audit_log as al\n"
+        "import shutil\n"
+        "def wipe(path):\n"
+        "    al('wipe', path)\n"
+        "    shutil.rmtree(path)\n"
+    )
+    assert (sites, passed) == (1, 1)
+    assert findings == []

@@ -309,3 +309,17 @@ def test_any_applicable_site_suppresses_the_zero_site_warning():
 
     assert report.total_sites == 1
     assert report.warnings == []
+
+
+def test_findings_order_is_fully_specified():
+    # Two findings can share a file and line (one sensitive call is a site
+    # for both oversight and error handling). Their relative order must not
+    # depend on rule registration order, or two runs of the same commit
+    # would produce different JSON.
+    report = score_contexts([ctx("import shutil\ndef f(p):\n    shutil.rmtree(p)\n")])
+
+    same_line = [f for f in report.findings if f.line == 3]
+    assert [f.rule for f in same_line] == sorted(f.rule for f in same_line)
+    assert report.findings == sorted(
+        report.findings, key=lambda f: (f.file, f.line, f.rule, f.message)
+    )

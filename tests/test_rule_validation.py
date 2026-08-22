@@ -127,3 +127,14 @@ def test_extra_validation_token_from_config_passes():
         config=config,
     )
     assert (sites, passed) == (1, 1)
+
+
+def test_aliased_validator_still_counts():
+    sites, passed, findings = run(
+        "from utils import sanitize as scrub\n"
+        "import shutil\n"
+        "def wipe(path):\n"
+        "    shutil.rmtree(scrub(path))\n"
+    )
+    assert (sites, passed) == (1, 1)
+    assert findings == []

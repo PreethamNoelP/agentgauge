@@ -3,8 +3,9 @@
 Inverted category: rules 1-5 ask "where risk exists, is a control present?"
 -- this one asks "where a governance knob exists, is it set to the safe
 side?" Sites are bindings of recognized flag names to boolean constants:
-assignments, keyword arguments, and function-parameter defaults. Bindings
-to non-constants are not sites; we can't judge a value we can't see.
+assignments, keyword arguments, function-parameter defaults, and
+string-keyed dict entries. Bindings to non-constants are not sites; we
+can't judge a value we can't see.
 """
 
 import ast
@@ -42,7 +43,8 @@ def _collapsed(name: str) -> str:
 
 def _flag_bindings(tree: ast.AST):
     """Yield (name, value_node, lineno) for every name-to-value binding:
-    assignments, keyword arguments, and parameter defaults."""
+    assignments, keyword arguments, parameter defaults, and dict entries
+    with a literal string key."""
     for node in ast.walk(tree):
         if isinstance(node, ast.Assign):
             for target in node.targets:
@@ -57,6 +59,18 @@ def _flag_bindings(tree: ast.AST):
                 yield node.target.attr, node.value, node.lineno
         elif isinstance(node, ast.keyword) and node.arg is not None:
             yield node.arg, node.value, node.value.lineno
+        elif isinstance(node, ast.Dict):
+            # Settings dicts are how a Python MCP server usually spells its
+            # own config -- SERVER = {"auto_approve": True} is the same
+            # governance decision as auto_approve = True, and was invisible.
+            # String keys only: a computed key names no flag we can judge.
+            for key, value in zip(node.keys, node.values):
+                if (
+                    isinstance(key, ast.Constant)
+                    and isinstance(key.value, str)
+                    and value is not None
+                ):
+                    yield key.value, value, key.lineno
         elif isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
             pos = [*node.args.posonlyargs, *node.args.args]
             defaults = node.args.defaults

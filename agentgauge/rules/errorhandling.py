@@ -29,7 +29,7 @@ def _is_unconditional_loop(node: ast.AST) -> bool:
     )
 
 
-def _loop_can_exit(loop: ast.While) -> bool:
+def _loop_can_exit(loop: ast.While, aliases: dict[str, str]) -> bool:
     """True if the loop contains an exit that actually leaves it. A break
     inside a nested loop only exits that inner loop; a return inside a
     nested def doesn't unwind this loop at all -- neither counts."""
@@ -42,7 +42,7 @@ def _loop_can_exit(loop: ast.While) -> bool:
                 return True
             if isinstance(child, ast.Break) and not in_nested_loop:
                 return True
-            if isinstance(child, ast.Call) and call_name(child) in _EXIT_CALLS:
+            if isinstance(child, ast.Call) and call_name(child, aliases) in _EXIT_CALLS:
                 return True
             nested = in_nested_loop or isinstance(
                 child, (ast.For, ast.AsyncFor, ast.While)
@@ -72,7 +72,7 @@ def check(ctx: FileContext) -> tuple[int, int, list[Finding]]:
         if not _is_unconditional_loop(node):
             continue
         sites += 1
-        if _loop_can_exit(node):
+        if _loop_can_exit(node, ctx.import_aliases):
             passed += 1
             continue
         findings.append(

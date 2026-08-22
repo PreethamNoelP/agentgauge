@@ -108,10 +108,17 @@ class ScanReport:
 
     @property
     def findings(self) -> list[Finding]:
-        """All findings across categories, ordered by location."""
+        """All findings across categories, in a fully specified order.
+
+        File and line first, then rule and message: two findings can share a
+        location (one call is a site for both oversight and error handling),
+        and leaving their order to sort stability would make it depend on
+        rule registration order -- a diff between two runs of the same
+        commit is exactly what a CI consumer must never see.
+        """
         return sorted(
             (f for c in self.categories for f in c.findings),
-            key=lambda f: (f.file, f.line),
+            key=lambda f: (f.file, f.line, f.rule, f.message),
         )
 
     def to_dict(self) -> dict:

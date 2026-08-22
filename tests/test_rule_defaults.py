@@ -68,3 +68,31 @@ def test_extra_dangerous_when_true_flag_matches_regardless_of_underscores():
     config = RuleConfig(dangerous_when_true=frozenset({"yolo_mode"}))
     sites, passed, _ = run("YOLOMODE = True\n", config=config)
     assert (sites, passed) == (1, 0)
+
+
+def test_dict_literal_flag_is_a_site():
+    # SERVER = {"auto_approve": True} is the same governance decision as
+    # auto_approve = True, and is how a Python MCP server usually spells
+    # its own settings.
+    sites, passed, findings = run('SERVER = {"auto_approve": True}\n')
+    assert (sites, passed) == (1, 0)
+    assert findings[0].line == 1
+    assert "auto_approve" in findings[0].message
+
+
+def test_dict_literal_safe_flag_passes():
+    sites, passed, findings = run('SERVER = {"require_approval": True}\n')
+    assert (sites, passed) == (1, 1)
+    assert findings == []
+
+
+def test_dict_with_a_computed_key_is_not_a_site():
+    sites, passed, findings = run("SERVER = {key: True}\n")
+    assert (sites, passed) == (0, 0)
+
+
+def test_nested_dict_flag_is_still_found():
+    sites, passed, findings = run(
+        'CONFIG = {"tools": {"shell": {"skip_confirmation": True}}}\n'
+    )
+    assert (sites, passed) == (1, 0)

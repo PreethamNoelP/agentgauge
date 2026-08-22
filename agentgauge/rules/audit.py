@@ -24,10 +24,15 @@ WEIGHT = 20
 LOG_TOKENS = {"log", "logger", "logging", "logged", "audit", "auditing", "audited"}
 
 
-def _makes_log_call(fn: ast.AST, log_tokens: frozenset[str]) -> bool:
+def _makes_log_call(
+    fn: ast.AST, log_tokens: frozenset[str], aliases: dict[str, str]
+) -> bool:
     for node in ast.walk(fn):
         if isinstance(node, ast.Call):
-            name = call_name(node)
+            # Alias-aware for the same reason the sink tables are: with
+            # `from telemetry import audit_log as al`, the local spelling
+            # `al(...)` carries none of the vocabulary the rule looks for.
+            name = call_name(node, aliases)
             if name is not None and name_tokens(name) & log_tokens:
                 return True
     return False
@@ -40,7 +45,7 @@ def check(ctx: FileContext) -> tuple[int, int, list[Finding]]:
         if not is_tool_function(fn, ctx.import_aliases):
             continue
         sites += 1
-        if _makes_log_call(fn, log_tokens):
+        if _makes_log_call(fn, log_tokens, ctx.import_aliases):
             passed += 1
             continue
         findings.append(

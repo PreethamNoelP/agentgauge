@@ -46,14 +46,21 @@ def _mentions(node: ast.AST, param: str) -> bool:
     return any(isinstance(n, ast.Name) and n.id == param for n in ast.walk(node))
 
 
-def _is_validated(fn: ast.AST, param: str, validation_tokens: frozenset[str]) -> bool:
+def _is_validated(
+    fn: ast.AST,
+    param: str,
+    validation_tokens: frozenset[str],
+    aliases: dict[str, str],
+) -> bool:
     for node in ast.walk(fn):
         if isinstance(node, (ast.If, ast.While)) and _mentions(node.test, param):
             return True
         if isinstance(node, ast.Assert) and _mentions(node.test, param):
             return True
         if isinstance(node, ast.Call):
-            name = call_name(node)
+            # Alias-aware: `from utils import sanitize as scrub` should not
+            # hide a recognized validator behind its local name.
+            name = call_name(node, aliases)
             if (
                 name is not None
                 and name_tokens(name) & validation_tokens
@@ -108,9 +115,9 @@ def check(ctx: FileContext) -> tuple[int, int, list[Finding]]:
             continue
         for arg in _risky_params(fn, risky_param_tokens):
             sites += 1
-            if _is_validated(fn, arg.arg, validation_tokens) or _annotation_is_constrained(
-                arg.annotation
-            ):
+            if _is_validated(
+                fn, arg.arg, validation_tokens, ctx.import_aliases
+            ) or _annotation_is_constrained(arg.annotation):
                 passed += 1
                 continue
             findings.append(
