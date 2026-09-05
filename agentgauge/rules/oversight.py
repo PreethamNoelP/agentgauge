@@ -22,7 +22,6 @@ from agentgauge.astutils import (
     dotted_name,
     enclosing_function,
     is_critical,
-    iter_identifiers,
     iter_scope,
 )
 from agentgauge.models import Finding
@@ -46,6 +45,21 @@ def _decorator_name(dec: ast.expr) -> str | None:
     return dotted_name(target)
 
 
+def _test_markers(test: ast.expr):
+    """Identifiers actually referenced by a test expression: Name and
+    Attribute nodes only -- not keyword-argument names of a call inside
+    it. A keyword name describes an unrelated call's own parameter, not
+    something the test enforces on: `if configure(require_approval=False):`
+    must not pass just because that call happens to have a keyword spelled
+    like the approval vocabulary (the same shape already fails as a bare
+    statement; iter_identifiers would let it back in via the `if`)."""
+    for node in ast.walk(test):
+        if isinstance(node, ast.Name):
+            yield node.id
+        elif isinstance(node, ast.Attribute):
+            yield node.attr
+
+
 def _has_approval_signal(
     scope: ast.AST, extra_markers: tuple[str, ...], aliases: dict[str, str]
 ) -> bool:
@@ -55,10 +69,10 @@ def _has_approval_signal(
             if name is not None and _mentions_marker(name, extra_markers):
                 return True
         elif isinstance(node, (ast.If, ast.While)):
-            if any(_mentions_marker(i, extra_markers) for i in iter_identifiers(node.test)):
+            if any(_mentions_marker(i, extra_markers) for i in _test_markers(node.test)):
                 return True
         elif isinstance(node, ast.Assert):
-            if any(_mentions_marker(i, extra_markers) for i in iter_identifiers(node.test)):
+            if any(_mentions_marker(i, extra_markers) for i in _test_markers(node.test)):
                 return True
     # iter_scope does not descend into nested defs, so the only FunctionDef
     # it yields is `scope` itself -- this branch reads that function's own

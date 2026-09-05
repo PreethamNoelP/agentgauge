@@ -81,6 +81,19 @@ def test_keyword_argument_named_like_approval_does_not_pass():
     assert (sites, passed) == (1, 0)
 
 
+def test_if_test_with_unrelated_keyword_argument_does_not_pass():
+    # Same bypass as test_keyword_argument_named_like_approval_does_not_pass,
+    # but wrapped in an if -- the keyword name must not count just because
+    # it now sits inside a test expression's subtree.
+    sites, passed, _ = run(
+        "def wipe(path):\n"
+        "    if configure(require_approval=False):\n"
+        "        pass\n"
+        "    shutil.rmtree(path)\n"
+    )
+    assert (sites, passed) == (1, 0)
+
+
 def test_if_test_naming_approval_passes():
     # The vocabulary sits in the if's *test*, not in a dead assignment --
     # an enforcing position even though the tested name is a bare Name,

@@ -24,6 +24,13 @@ explicitly.
   enclosing subtree, so a module-level sink was satisfied by any unrelated
   function in the same file that mentioned approval — silencing
   `FAIL_CRITICAL`. The signal must now share the call's execution scope.
+- An `if`/`while`/`assert` test containing an unrelated call with a
+  keyword argument spelled like the approval vocabulary
+  (`if configure(require_approval=False):`) satisfied the human-oversight
+  rule, because the test-walk picked up keyword-argument names along with
+  real identifiers. The bare-statement form of this shape was already
+  caught; only the `if`-wrapped form was not. Test expressions now only
+  match a directly-referenced name or attribute, not a keyword name.
 - New sinks: `pathlib` deletion (`unlink`, `rmdir`), `asyncio`
   subprocesses, the `os.exec*` / `os.spawn*` family,
   `subprocess.getoutput` / `getstatusoutput`, unsafe deserialization
