@@ -246,13 +246,14 @@ protected by that try. `try`/`except*` counts the same as `try`/`except`.
 
 ## Rule 5 — Tool scope & input validation (`input-validation`, 15 pts)
 
-**Heuristic:** parameters of tool functions whose names contain a risky
-token (`path`, `file`, `dir`, `cmd`, `command`, `query`, `sql`, `url`,
-`host`, `target`, ...) must be referenced by a validation construct in the
-function: an `if`/`while`/`assert` test mentioning the parameter, or a
-call with validation vocabulary (`validate*`, `sanitize`, `check*`,
-`shlex.quote`, allowlist names) receiving it. Alias-aware on the validator
-side.
+**Heuristic:** parameters of tool functions whose name, split into lowercase
+tokens on `.`/`_` (the same token mechanism rule 2 uses), has one exactly
+equal to a risky token (`path`, `file`, `dir`, `cmd`, `command`, `query`,
+`sql`, `url`, `host`, `target`, ...) must be referenced by a validation
+construct in the function: an `if`/`while`/`assert` test mentioning the
+parameter, or a call with validation vocabulary (`validate*`, `sanitize`,
+`check*`, `shlex.quote`, allowlist names) receiving it. Alias-aware on the
+validator side.
 
 - **Catches:** the canonical MCP hole — `path`/`cmd`/`query` flowing
   straight into `open()`/`subprocess`/a DB.
@@ -261,8 +262,14 @@ side.
   parameter merely mentioned in an unrelated conditional passes.
 - **False failures / blind spots:** validators we don't recognize by name
   (`normalize(path)`). A risky value in a param named `p` is invisible.
-  Inputs arriving as a Pydantic model field rather than a parameter are not
-  seen at all — a real gap for FastMCP servers that declare a schema class.
+  So is one whose risky word isn't its own token: token matching splits
+  only on `.`/`_`, so a concatenated or camelCase name — `filePath`,
+  `sqlQuery`, `cmdline` — never produces a token that exactly equals
+  `path`/`sql`/`cmd`, and the parameter is skipped entirely rather than
+  flagged. Prefer `file_path` / `sql_query` / `cmd_line` if you want this
+  rule to see the parameter at all. Inputs arriving as a Pydantic model
+  field rather than a parameter are not seen at all — a real gap for
+  FastMCP servers that declare a schema class.
 - **Type-annotation evidence:** `Literal["a", "b"]` (a closed set of
   allowed values) and `Annotated[T, Field(...)]` (the FastMCP/Pydantic
   idiom for declaring pattern/length/range constraints) both count as
