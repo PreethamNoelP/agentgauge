@@ -300,6 +300,44 @@ def test_control_characters_in_output_are_defanged(capsys):
     assert "\\x1b[2Jname.py" in out
 
 
+def test_bidi_and_c1_characters_in_output_are_defanged(capsys):
+    # Before: only C0 controls and DEL were escaped, so three ways of
+    # misleading the reader survived. U+202E RIGHT-TO-LEFT OVERRIDE in a
+    # file name reverses the rest of the line as it renders, which is the
+    # Trojan Source trick (CVE-2021-42574) aimed at the report rather than
+    # at source; 0x9B is CSI to a terminal in 8-bit mode, reaching the same
+    # capability the C0 range already blocked through a different encoding;
+    # and zero-width characters hide content outright. All are legal in a
+    # POSIX filename, so all are attacker-controlled on a scanned repo.
+    rlo, csi, zwsp = chr(0x202E), chr(0x9B), chr(0x200B)
+    report = ScanReport(categories=[], files_scanned=1)
+    report.categories.append(
+        CategoryResult(
+            name="Permissive defaults",
+            weight=10,
+            sites=1,
+            findings=[
+                Finding(
+                    rule="permissive-defaults",
+                    file=f"safe{rlo}gnp.py",
+                    line=1,
+                    message=f"flagged{csi}[2J",
+                    fix=f"fix{zwsp}it",
+                )
+            ],
+        )
+    )
+
+    _print_report(report, "target", None)
+
+    out = capsys.readouterr().out
+    for raw in (rlo, csi, zwsp):
+        assert raw not in out
+    assert "safe\\u202egnp.py" in out
+    assert "flagged\\x9b[2J" in out
+    assert "fix\\u200bit" in out
+
+
 def test_unknown_config_key_is_a_usage_error(tmp_path, capsys):
     (tmp_path / "pyproject.toml").write_text("[tool.agentgauge]\nexcludes = ['x']\n")
     (tmp_path / "server.py").write_text("x = 1\n")

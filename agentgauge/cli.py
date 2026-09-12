@@ -25,9 +25,38 @@ from agentgauge.scoring import ScanReport
 # Scanned repositories are untrusted input, and file names reach the
 # terminal verbatim. A path containing an ANSI escape (legal on Linux and
 # macOS) could otherwise repaint or erase the report a reviewer is reading.
-_ESCAPES = {c: f"\\x{c:02x}" for c in range(32)}
+_ESCAPES: dict[int, str] = {c: f"\\x{c:02x}" for c in range(32)}
 _ESCAPES[127] = "\\x7f"
 _ESCAPES[ord("\t")] = "    "
+
+# C1 controls. A terminal in 8-bit mode reads 0x9b as CSI -- the single-byte
+# equivalent of the ESC-[ that the C0 range above already defangs -- so
+# escaping only C0 left the same capability reachable through a different
+# encoding of it.
+_ESCAPES.update({c: f"\\x{c:02x}" for c in range(0x80, 0xA0)})
+
+# Characters that reorder or hide text without being "control characters" at
+# all. A file named with U+202E RIGHT-TO-LEFT OVERRIDE makes the rest of a
+# finding line render in reverse, so a reviewer reading the report sees a
+# path, rule id or fix that is not the one agentgauge found -- the Trojan
+# Source trick (CVE-2021-42574) pointed at the report instead of at source.
+# Zero-width characters hide content in the same spirit. None of these have
+# any legitimate place in a rendered finding, so they are shown escaped
+# rather than obeyed.
+_ESCAPES.update(
+    {
+        c: f"\\u{c:04x}"
+        for c in (
+            *range(0x202A, 0x202F),  # LRE RLE PDF LRO RLO
+            *range(0x2066, 0x206A),  # LRI RLI FSI PDI
+            0x200B,                  # zero-width space
+            0x200C,                  # zero-width non-joiner
+            0x200D,                  # zero-width joiner
+            0x2060,                  # word joiner
+            0xFEFF,                  # zero-width no-break space / BOM
+        )
+    }
+)
 
 
 def _safe(text: str) -> str:

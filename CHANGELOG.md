@@ -32,6 +32,25 @@ explicitly.
   has no agent tool-calling code, drop `--fail-on-incomplete` for it rather
   than treating 100/100 as a governance result.
 
+### Security
+
+- Terminal output escaping covered only C0 controls and DEL, leaving three
+  ways for a scanned repository to mislead the person reading the report.
+  All three are legal in a POSIX filename, so all three are
+  attacker-controlled on an untrusted repo, and SECURITY.md already treats
+  output injection as in scope.
+
+  U+202E RIGHT-TO-LEFT OVERRIDE in a file name reverses the rest of the
+  line as it renders -- the Trojan Source trick (CVE-2021-42574) pointed at
+  the report instead of at source, so a reviewer sees a path, rule id or
+  fix that is not the one agentgauge found. Byte 0x9B is CSI to a terminal
+  in 8-bit mode, reaching the same repaint-the-screen capability the C0
+  range already blocked through a different encoding of it. Zero-width
+  characters hide content outright.
+
+  C1 controls, the bidi embedding/override and isolate ranges, and the
+  zero-width set are now escaped rather than obeyed.
+
 ### Added
 
 - Excluded files are counted and reported: `excluded` in JSON and SARIF, an
