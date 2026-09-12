@@ -132,6 +132,34 @@ def test_build_import_aliases_skips_relative_imports():
     assert build_import_aliases(tree) == {}
 
 
+def test_build_import_aliases_resolves_a_rebinding_chain_in_document_order():
+    # Pins the ordering the single-walk implementation has to preserve:
+    # imports are all collected before any assignment is resolved, and
+    # assignments are then resolved in the order they appear, so each hop
+    # can see the one before it.
+    tree = ast.parse("import shutil as sh\nA = sh.rmtree\nB = A\n")
+
+    assert build_import_aliases(tree) == {
+        "sh": "shutil",
+        "A": "shutil.rmtree",
+        "B": "shutil.rmtree",
+    }
+
+
+def test_build_import_aliases_resolution_is_order_dependent():
+    # The documented limit of the above: a rebinding written before the
+    # name it refers to resolves only as far as what was known at that
+    # point. Pinned so the behavior is a decision, not an accident -- and
+    # so a future refactor cannot quietly change it in either direction.
+    tree = ast.parse("B = A\nA = sh.rmtree\nimport shutil as sh\n")
+
+    assert build_import_aliases(tree) == {
+        "sh": "shutil",
+        "A": "shutil.rmtree",
+        "B": "A",
+    }
+
+
 def test_dotted_name_resolves_module_alias():
     aliases = {"sp": "subprocess"}
     assert dotted_name(first_call("sp.run(cmd)").func, aliases) == "subprocess.run"

@@ -240,6 +240,15 @@ def build_import_aliases(tree: ast.AST) -> dict[str, str]:
     (documented in RULES.md).
     """
     aliases: dict[str, str] = {}
+    # Single walk. Assignments are set aside rather than resolved in place,
+    # because resolution has to happen *after* every import is known -- see
+    # the second loop. This used to be two full ast.walk passes over the
+    # tree, which measured as the most expensive thing a scan did per file.
+    # Collecting once and replaying the (much shorter) assignment list
+    # preserves the ordering the two-pass version relied on: ast.walk order
+    # is stable, so a chain like `_a = sh.rmtree` then `_b = _a` still
+    # resolves in document order.
+    assignments: list[ast.Assign] = []
     for node in ast.walk(tree):
         if isinstance(node, ast.Import):
             for alias in node.names:
@@ -253,16 +262,16 @@ def build_import_aliases(tree: ast.AST) -> dict[str, str]:
                     continue
                 local = alias.asname if alias.asname is not None else alias.name
                 aliases[local] = f"{node.module}.{alias.name}"
+        elif isinstance(node, ast.Assign) and len(node.targets) == 1:
+            assignments.append(node)
     # Second pass: imports are collected first so a rebinding can resolve
     # through them (`import subprocess as sp` then `run = sp.run`), and so
     # an import always wins over an assignment to the same name.
-    for node in ast.walk(tree):
-        if not isinstance(node, ast.Assign) or len(node.targets) != 1:
-            continue
-        target = node.targets[0]
+    for assign in assignments:
+        target = assign.targets[0]
         if not isinstance(target, ast.Name) or target.id in aliases:
             continue
-        resolved = dotted_name(node.value, aliases)
+        resolved = dotted_name(assign.value, aliases)
         if resolved is not None and resolved != target.id:
             aliases[target.id] = resolved
     return aliases
@@ -452,14 +461,38 @@ class FileContext:
         return build_parent_map(self.tree)
 
     @cached_property
+    def _defs_and_calls(self) -> tuple[list["FunctionNode"], list[ast.Call]]:
+        """Every def/async def and every Call in the file, from one walk.
+
+        `functions` and `sensitive_calls` are both wanted by nearly every
+        scan, and each used to walk the whole tree for itself. Binning both
+        node types in a single pass halves that; the lists hold references
+        to nodes the tree already owns, so the extra memory is one pointer
+        per def and per call, not a copy of anything.
+        """
+        functions: list["FunctionNode"] = []
+        calls: list[ast.Call] = []
+        for node in ast.walk(self.tree):
+            if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                functions.append(node)
+            elif isinstance(node, ast.Call):
+                calls.append(node)
+        return functions, calls
+
+    @cached_property
     def functions(self) -> list["FunctionNode"]:
         """Every def/async def in the file, nested ones included."""
-        return list(iter_functions(self.tree))
+        return self._defs_and_calls[0]
 
     @cached_property
     def sensitive_calls(self) -> list[tuple[ast.Call, str]]:
         """Every (call, action label) pair in the file, alias-resolved."""
-        return list(iter_sensitive_calls(self.tree, self.import_aliases))
+        aliases = self.import_aliases
+        return [
+            (call, label)
+            for call in self._defs_and_calls[1]
+            if (label := sensitive_label(call, aliases)) is not None
+        ]
 
     @cached_property
     def tool_functions(self) -> set["FunctionNode"]:
