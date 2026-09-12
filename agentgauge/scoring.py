@@ -14,7 +14,7 @@ just hiding it (a hidden failure would silently understate the score).
 """
 
 from dataclasses import asdict, dataclass, field
-from typing import Iterable
+from typing import Any, Iterable
 
 from agentgauge.astutils import FileContext
 from agentgauge.models import CategoryResult, Finding
@@ -44,6 +44,11 @@ class ScanReport:
     categories: list[CategoryResult]
     files_scanned: int = 0
     skipped: list[str] = field(default_factory=list)
+    # Files an `exclude` pattern kept out of the scan. A deliberate choice,
+    # unlike `skipped` -- but an invisible one until now: the report said
+    # "scanned 1 file(s)" whether or not config had removed a hundred more.
+    # Counted so a reader can tell a small repo from a filtered one.
+    excluded: int = 0
     suppressed: int = 0
     critical_suppressed: int = 0
     # Human-readable notes about the scan itself rather than the code:
@@ -93,10 +98,23 @@ class ScanReport:
         for the sinks, so we have no finding to fail on and no honest way to
         claim one. INCOMPLETE is the truthful answer, and
         --fail-on-incomplete is how CI turns it into a red build.
+
+        A scan with zero applicable *sites* is INCOMPLETE for the same
+        reason, and this was the last way to get a vacuous PASS. Every
+        category scores full marks when it never applied (see
+        CategoryResult.score), so a repo agentgauge recognized nothing in
+        scores exactly 100.0/100 -- and used to report PASS and exit 0
+        under `--min-score 100 --fail-on-incomplete`, the strictest
+        invocation available. That is reachable without any hostile intent:
+        an agent codebase built on an SDK whose sinks are not in our tables,
+        or an `exclude` pattern that happens to cover the one file that
+        mattered. The arithmetic is right and the conclusion a CI consumer
+        draws from it is wrong, so the verdict now says so. Like a disabled
+        gate this cannot be FAIL_CRITICAL: we found nothing to fail on.
         """
         if any(f.critical for f in self.findings) or self.critical_suppressed:
             return "FAIL_CRITICAL"
-        if self.skipped or self.gate_disabled:
+        if self.skipped or self.gate_disabled or self.total_sites == 0:
             return "INCOMPLETE"
         return "PASS"
 
@@ -123,7 +141,7 @@ class ScanReport:
             key=lambda f: (f.file, f.line, f.rule, f.message),
         )
 
-    def to_dict(self) -> dict:
+    def to_dict(self) -> dict[str, Any]:
         return {
             "score": round(self.score, 1),
             "max_score": self.max_score,
@@ -143,6 +161,7 @@ class ScanReport:
             ],
             "findings": [asdict(f) for f in self.findings],
             "skipped": self.skipped,
+            "excluded": self.excluded,
             "suppressed": self.suppressed,
             "critical_suppressed": self.critical_suppressed,
             "warnings": self.warnings,
@@ -232,6 +251,7 @@ def score_contexts(
         warnings.append(
             f"no governance-relevant sites found in {files_scanned} file(s): "
             "this score reflects the absence of anything to check, not "
-            "evidence of governance"
+            "evidence of governance -- the verdict is INCOMPLETE for that "
+            "reason, and --fail-on-incomplete turns it into a red build"
         )
     return report

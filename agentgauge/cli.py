@@ -51,6 +51,14 @@ def _print_report(report: ScanReport, target: str, config_source: str | None) ->
     print(f"  {'GOVERNANCE SCORE':<34}{report.score:>6.1f} / {report.max_score}")
     print(f"  {'VERDICT':<34}{report.verdict}")
 
+    # The denominator behind the score, in the one place a reader cannot
+    # miss it. A 100.0 over 0 sites and a 100.0 over 200 are the same
+    # number and completely different claims; printing only the number let
+    # the first pass for the second.
+    print(f"  {'APPLICABLE SITES':<34}{report.total_sites}")
+    if report.excluded:
+        print(f"  {'EXCLUDED BY CONFIG':<34}{report.excluded} file(s)")
+
     if report.suppressed:
         print(f"  ({report.suppressed} finding(s) suppressed by inline comment)")
     if report.critical_suppressed:
@@ -121,7 +129,9 @@ def _build_parser() -> argparse.ArgumentParser:
     return parser
 
 
-def _emit(report: ScanReport, args, config_source: str | None) -> None:
+def _emit(
+    report: ScanReport, args: argparse.Namespace, config_source: str | None
+) -> None:
     """Write the report in the requested format.
 
     A consumer closing the pipe (`agentgauge . --json | head`) is a normal

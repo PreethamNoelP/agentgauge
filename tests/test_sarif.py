@@ -51,8 +51,12 @@ def test_sarif_run_properties_carry_score_and_verdict():
     assert props == {
         "score": 100.0,
         "maxScore": 100,
-        "verdict": "PASS",
+        # 100.0 over zero sites is INCOMPLETE, not PASS -- a dashboard
+        # reading only `score` would otherwise see a perfect result for a
+        # scan that recognized nothing.
+        "verdict": "INCOMPLETE",
         "filesScanned": 1,
+        "excluded": 0,
         "totalSites": 0,
         "suppressed": 0,
         "criticalSuppressed": 0,

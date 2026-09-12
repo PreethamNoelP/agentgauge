@@ -12,6 +12,7 @@ import fnmatch
 import os
 import tokenize
 from pathlib import Path
+from typing import Callable, Iterator
 
 from agentgauge.astutils import FileContext
 from agentgauge.config import Config
@@ -84,11 +85,22 @@ def _is_excluded(rel_posix: str, patterns: tuple[str, ...]) -> bool:
     return False
 
 
-def iter_python_files(root: Path, exclude: tuple[str, ...] = ()):
+def iter_python_files(
+    root: Path,
+    exclude: tuple[str, ...] = (),
+    on_excluded: Callable[[Path], None] | None = None,
+) -> Iterator[Path]:
     """Yield .py files under root in sorted (deterministic) order,
     or root itself if it is a single file. An explicitly named file is
     always scanned -- exclude patterns filter a walk, they do not overrule
-    the target the caller asked for."""
+    the target the caller asked for.
+
+    `on_excluded` is called once per file an `exclude` pattern removed, so
+    the report can say how much of the tree config kept it from seeing.
+    SKIP_DIRS hits are deliberately not reported: those are built-in noise
+    filters (.venv, node_modules) that every run applies identically, not a
+    project decision a reader of the report needs to know about.
+    """
     if root.is_file():
         yield root
         return
@@ -97,6 +109,8 @@ def iter_python_files(root: Path, exclude: tuple[str, ...] = ()):
         if any(part in SKIP_DIRS for part in rel.parts):
             continue
         if exclude and _is_excluded(rel.as_posix(), exclude):
+            if on_excluded is not None:
+                on_excluded(path)
             continue
         yield path
 
@@ -184,9 +198,14 @@ def scan(target: str | Path, config: Config | None = None) -> ScanReport:
     config = config if config is not None else Config()
     cwd = Path(os.path.abspath(os.curdir))
     skipped: list[str] = []
+    excluded = 0
 
-    def iter_contexts():
-        for path in iter_python_files(root, config.exclude):
+    def count_excluded(_path: Path) -> None:
+        nonlocal excluded
+        excluded += 1
+
+    def iter_contexts() -> Iterator[FileContext]:
+        for path in iter_python_files(root, config.exclude, count_excluded):
             rel = _display_path(path, root, cwd)
 
             def note(reason: str) -> None:
@@ -231,4 +250,16 @@ def scan(target: str | Path, config: Config | None = None) -> ScanReport:
 
     report = score_contexts(iter_contexts(), disabled_rules=config.rules.disabled_rules)
     report.skipped = skipped
+    # Assigned after score_contexts has drained the generator, so the count
+    # is final. Unlike `skipped` this does not make the verdict INCOMPLETE:
+    # excluding files is a deliberate project decision, not a gap in
+    # coverage agentgauge hit by accident. It only has to be *visible* --
+    # and when an exclude pattern does hide everything that mattered, the
+    # resulting zero-site scan is INCOMPLETE on its own merits.
+    report.excluded = excluded
+    if excluded:
+        report.warnings.append(
+            f"{excluded} file(s) were not scanned because an 'exclude' pattern "
+            "in the config matched them"
+        )
     return report

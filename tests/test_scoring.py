@@ -85,9 +85,25 @@ def test_score_contexts_accepts_a_lazy_iterable():
 
 # --- verdict: a gate independent of the 0-100 score ---
 
-def test_clean_scan_verdict_is_pass():
-    report = score_contexts([ctx("def add(a, b):\n    return a + b\n")])
+def test_clean_scan_with_applicable_sites_is_pass():
+    # A PASS has to be earned against something. This source has real
+    # sites and passes all of them.
+    report = score_contexts([ctx(FULLY_GOVERNED)])
+    assert report.total_sites > 0
     assert report.verdict == "PASS"
+
+
+def test_zero_applicable_sites_is_incomplete_not_pass():
+    # Before: every category scores full marks when it never applied, so a
+    # file agentgauge recognized nothing in scored 100.0/100 and reported
+    # PASS -- exit 0 even under `--min-score 100 --fail-on-incomplete`,
+    # the strictest invocation there is. The arithmetic was right and the
+    # conclusion a CI consumer drew from it was wrong.
+    report = score_contexts([ctx("def add(a, b):\n    return a + b\n")])
+
+    assert report.score == 100.0
+    assert report.total_sites == 0
+    assert report.verdict == "INCOMPLETE"
 
 
 def test_critical_finding_fails_verdict_regardless_of_score():

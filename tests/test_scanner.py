@@ -424,3 +424,58 @@ def test_escapes_scan_root_ignores_non_symlinks_without_resolving(tmp_path):
     # what keeps the check off the hot path for every ordinary file.
     plain = _FakeLink(OSError("resolve must not be called"), symlink=False)
     assert escapes_scan_root(plain, tmp_path) is False
+
+
+# --- config excludes must be visible in the report ---
+
+def test_excluded_files_are_counted_and_warned_about(tmp_path):
+    # Before: the report said "scanned 1 Python file(s)" whether or not an
+    # exclude pattern had removed a hundred more. A reader could not tell a
+    # small repo from a heavily filtered one.
+    (tmp_path / "src").mkdir()
+    (tmp_path / "src" / "a.py").write_text("auto_approve = True\n")
+    (tmp_path / "src" / "b.py").write_text("auto_approve = True\n")
+    (tmp_path / "keep.py").write_text("auto_approve = False\n")
+
+    report = scan(tmp_path, config=Config(exclude=("src/*",)))
+
+    assert report.files_scanned == 1
+    assert report.excluded == 2
+    assert report.to_dict()["excluded"] == 2
+    assert any("exclude" in w for w in report.warnings)
+
+
+def test_skip_dirs_are_not_counted_as_config_exclusions(tmp_path):
+    # .venv/node_modules are built-in noise filters every run applies the
+    # same way, not a project decision worth reporting.
+    (tmp_path / "keep.py").write_text("auto_approve = False\n")
+    (tmp_path / ".venv").mkdir()
+    (tmp_path / ".venv" / "lib.py").write_text("auto_approve = True\n")
+
+    report = scan(tmp_path)
+
+    assert report.files_scanned == 1
+    assert report.excluded == 0
+    assert report.warnings == []
+
+
+def test_exclude_hiding_every_sink_cannot_produce_a_pass(tmp_path):
+    # The hole this closes: `exclude` removed the only file with sinks, so
+    # every category scored "no applicable sites" -> full marks -> 100.0,
+    # and the verdict was PASS with exit 0 even under the strictest flags.
+    # disabled_rules was already blocked from doing this; exclude was not.
+    (tmp_path / "src").mkdir()
+    (tmp_path / "src" / "server.py").write_text(
+        "import shutil\ndef wipe(path):\n    shutil.rmtree(path)\n"
+    )
+    (tmp_path / "harmless.py").write_text("def add(a, b):\n    return a + b\n")
+
+    unfiltered = scan(tmp_path)
+    assert unfiltered.verdict == "FAIL_CRITICAL"
+
+    filtered = scan(tmp_path, config=Config(exclude=("src/*",)))
+
+    assert filtered.score == 100.0          # the arithmetic is unchanged
+    assert filtered.total_sites == 0
+    assert filtered.verdict == "INCOMPLETE"  # the conclusion is not
+    assert filtered.excluded == 1

@@ -8,6 +8,8 @@ other.
 https://docs.oasis-open.org/sarif/sarif/v2.1.0/sarif-v2.1.0.html
 """
 
+from typing import Any
+
 from agentgauge import __version__
 from agentgauge.scoring import ALL_RULES, ScanReport
 
@@ -19,7 +21,7 @@ SCHEMA_URI = (
 _RULE_INDEX = {rule.RULE_ID: i for i, rule in enumerate(ALL_RULES)}
 
 
-def _rule_descriptors() -> list[dict]:
+def _rule_descriptors() -> list[dict[str, Any]]:
     """One SARIF reportingDescriptor per registered rule, regardless of
     whether it produced a finding in this particular scan -- a stable rule
     catalog is what lets a dashboard track a rule's history across scans."""
@@ -35,7 +37,7 @@ def _rule_descriptors() -> list[dict]:
     ]
 
 
-def _invocation(report: ScanReport, config_source: str | None) -> dict:
+def _invocation(report: ScanReport, config_source: str | None) -> dict[str, Any]:
     """The run's invocation record: what agentgauge could not read.
 
     A --sarif consumer sees only `results`, so without this a file skipped
@@ -43,7 +45,7 @@ def _invocation(report: ScanReport, config_source: str | None) -> dict:
     from the dashboard entirely -- and silent gaps in coverage are exactly
     what the INCOMPLETE verdict exists to surface.
     """
-    invocation: dict = {
+    invocation: dict[str, Any] = {
         # True even with notifications present: agentgauge itself ran to
         # completion. Per-file failures are reported, not run failures.
         "executionSuccessful": True,
@@ -58,7 +60,9 @@ def _invocation(report: ScanReport, config_source: str | None) -> dict:
     return invocation
 
 
-def build_sarif(report: ScanReport, config_source: str | None = None) -> dict:
+def build_sarif(
+    report: ScanReport, config_source: str | None = None
+) -> dict[str, Any]:
     """Render a ScanReport as a SARIF 2.1.0 log. `critical` findings map to
     SARIF "error" level (build-breaking); everything else maps to "warning"
     -- mirroring the same critical/non-critical split the verdict itself
@@ -107,6 +111,7 @@ def build_sarif(report: ScanReport, config_source: str | None = None) -> dict:
                     "maxScore": report.max_score,
                     "verdict": report.verdict,
                     "filesScanned": report.files_scanned,
+                    "excluded": report.excluded,
                     "totalSites": report.total_sites,
                     "suppressed": report.suppressed,
                     "criticalSuppressed": report.critical_suppressed,

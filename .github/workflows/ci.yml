@@ -63,11 +63,59 @@ jobs:
           python-version: "3.12"
       - run: pip install -e .
 
-      - name: Own source scores 100 with a complete scan
-        run: agentgauge . --min-score 100 --fail-on-incomplete
+      - name: Own source is finding-free
+        # This gate used to be `agentgauge . --min-score 100
+        # --fail-on-incomplete`, which passed for a reason that was not the
+        # one it advertised: agentgauge's own source contains no sinks, no
+        # tool functions and no governance flags, so every category scored
+        # "no applicable sites" -> full marks -> 100.0/100. It asserted
+        # arithmetic over an empty set, not a clean codebase. Zero sites is
+        # INCOMPLETE now, so the honest claim is the one made here -- no
+        # findings -- and the "scores 100 against real sites" claim is
+        # carried by the clean fixture below, which has 24 of them.
+        run: |
+          agentgauge . --json > "$RUNNER_TEMP/self.json" && code=0 || code=$?
+          if [ "$code" -ne 0 ]; then
+            echo "::error::self-scan exited $code, expected 0"
+            exit 1
+          fi
+          python - <<'PY'
+          import json, os
+          r = json.load(open(os.environ["RUNNER_TEMP"] + "/self.json"))
+          assert r["findings"] == [], r["findings"]
+          assert r["skipped"] == [], r["skipped"]
+          assert r["total_sites"] == 0, (
+              f"agentgauge's own source now has {r['total_sites']} site(s); "
+              "if that is intentional, gate this on --min-score instead"
+          )
+          PY
 
-      - name: Clean fixture is not a false positive
-        run: agentgauge tests/fixtures/clean_server.py --min-score 100 --fail-on-incomplete
+      - name: Clean fixture scores 100 against real sites
+        run: |
+          agentgauge tests/fixtures/clean_server.py --min-score 100 --fail-on-incomplete
+          agentgauge tests/fixtures/clean_server.py --json > "$RUNNER_TEMP/clean.json"
+          python - <<'PY'
+          import json, os
+          r = json.load(open(os.environ["RUNNER_TEMP"] + "/clean.json"))
+          # The point of this gate: a 100 that was *earned*. Without this
+          # assertion it would pass just as happily on an empty file.
+          assert r["total_sites"] > 0, r["total_sites"]
+          assert r["verdict"] == "PASS", r["verdict"]
+          assert r["findings"] == [], r["findings"]
+          PY
+
+      - name: A scan that recognized nothing cannot report PASS
+        # The regression gate for the vacuous-pass hole. An empty-ish repo
+        # under the strictest flags must be INCOMPLETE and exit 1.
+        run: |
+          mkdir -p "$RUNNER_TEMP/nosites"
+          printf 'def add(a, b):\n    return a + b\n' > "$RUNNER_TEMP/nosites/util.py"
+          agentgauge "$RUNNER_TEMP/nosites" --min-score 100 --fail-on-incomplete \
+            && code=0 || code=$?
+          if [ "$code" -ne 1 ]; then
+            echo "::error::zero-site scan exited $code, expected 1 -- the vacuous-pass hole is back"
+            exit 1
+          fi
 
       - name: Vulnerable fixture is still detected
         # The regression gate that matters: if detection silently breaks,

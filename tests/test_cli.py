@@ -196,6 +196,37 @@ def test_fail_on_incomplete_does_not_affect_a_complete_scan(tmp_path):
     assert main([str(tmp_path), "--fail-on-incomplete"]) == 0
 
 
+def test_zero_sites_cannot_pass_the_strictest_gate(tmp_path, capsys):
+    # The hole: a repo agentgauge recognized nothing in scored 100.0/100
+    # and exited 0 under `--min-score 100 --fail-on-incomplete` -- the
+    # strictest invocation available. A team reading that green build
+    # concluded "governed" when the truthful answer was "not measured".
+    (tmp_path / "util.py").write_text("def add(a, b):\n    return a + b\n")
+
+    code = main([str(tmp_path), "--min-score", "100", "--fail-on-incomplete"])
+
+    captured = capsys.readouterr()
+    assert code == 1
+    assert "INCOMPLETE" in captured.out
+    assert "APPLICABLE SITES" in captured.out
+    assert "absence of anything to check" in captured.err
+
+
+def test_excluded_file_count_is_shown_to_the_reader(tmp_path, capsys):
+    (tmp_path / "pyproject.toml").write_text(
+        "[tool.agentgauge]\nexclude = ['hidden/*']\n"
+    )
+    (tmp_path / "hidden").mkdir()
+    (tmp_path / "hidden" / "server.py").write_text("auto_approve = True\n")
+    (tmp_path / "kept.py").write_text("auto_approve = False\n")
+
+    main([str(tmp_path)])
+
+    captured = capsys.readouterr()
+    assert "EXCLUDED BY CONFIG" in captured.out
+    assert "1 file(s)" in captured.out
+
+
 def test_disabled_gate_rule_is_warned_about_and_not_a_pass(tmp_path, capsys):
     (tmp_path / "pyproject.toml").write_text(
         "[tool.agentgauge]\ndisabled_rules = ['human-oversight']\n"

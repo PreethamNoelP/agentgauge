@@ -194,6 +194,7 @@ def test_json_report_top_level_keys_are_stable():
         "categories",
         "findings",
         "skipped",
+        "excluded",
         "suppressed",
         "critical_suppressed",
         "warnings",
