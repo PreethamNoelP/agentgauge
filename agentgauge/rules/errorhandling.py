@@ -9,6 +9,7 @@ Two kinds of sites feed this category:
 """
 
 import ast
+from typing import TypeGuard
 
 from agentgauge.astutils import FileContext, call_name
 from agentgauge.models import Finding
@@ -17,11 +18,17 @@ RULE_ID = "error-handling"
 CATEGORY = "Error handling"
 WEIGHT = 15
 
-_EXIT_CALLS = {"sys.exit", "os._exit", "exit", "quit"}
-_TRY_TYPES = (ast.Try, ast.TryStar) if hasattr(ast, "TryStar") else (ast.Try,)
+_EXIT_CALLS = frozenset({"sys.exit", "os._exit", "exit", "quit"})
+# ast.TryStar has existed since 3.11, which is this package's floor
+# (requires-python = ">=3.11"), so the hasattr guard this used to carry was
+# unreachable compatibility code for an interpreter agentgauge cannot run on.
+_TRY_TYPES = (ast.Try, ast.TryStar)
 
 
-def _is_unconditional_loop(node: ast.AST) -> bool:
+def _is_unconditional_loop(node: ast.AST) -> TypeGuard[ast.While]:
+    """True for `while True:` / `while 1:`. Narrows the type as well as
+    answering the question, so callers get an ast.While without a second
+    isinstance check that could drift out of sync with this one."""
     return (
         isinstance(node, ast.While)
         and isinstance(node.test, ast.Constant)
@@ -59,7 +66,9 @@ def _in_try_body(node: ast.AST, parents: dict[ast.AST, ast.AST]) -> bool:
     we climbed through, which tells us WHICH compartment held the node."""
     prev, current = node, parents.get(node)
     while current is not None:
-        if isinstance(current, _TRY_TYPES) and any(prev is s for s in current.body):
+        if isinstance(current, (ast.Try, ast.TryStar)) and any(
+            prev is s for s in current.body
+        ):
             return True
         prev, current = current, parents.get(current)
     return False

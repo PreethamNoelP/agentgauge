@@ -35,8 +35,11 @@ classifiers = [
 
 [project.optional-dependencies]
 # The scanner itself has no runtime dependencies; this is only for
-# `pip install -e .[dev]` when working on agentgauge.
-dev = ["pytest>=7"]
+# `pip install -e .[dev]` when working on agentgauge. mypy is here because
+# the package ships py.typed: that marker is a promise to anyone writing a
+# third-party rule, and an unchecked promise is how it silently stops being
+# true. ruff replaces nothing a human was doing reliably by hand.
+dev = ["pytest>=7", "mypy>=1.8", "ruff>=0.5"]
 
 [project.urls]
 Homepage = "https://github.com/PreethamNoelP/agentgauge"
@@ -65,3 +68,21 @@ version = { attr = "agentgauge.__version__" }
 # deliberately vulnerable by design. CI gates the fixtures separately:
 # the clean one must score 100, the vulnerable one must exit 1.
 exclude = ["tests/*"]
+
+[tool.ruff]
+target-version = "py311"
+line-length = 88
+# tests/fixtures/*.py are scanner *input*, not runnable code: they
+# deliberately reference undefined names (mcp.tool, request_approval,
+# process_next) because they are only ever parsed by ast.parse, never
+# imported or executed. Linting them reports 33 F821s that are the point of
+# the files. Everything else, including the tests themselves, is linted.
+extend-exclude = ["tests/fixtures"]
+
+[tool.mypy]
+python_version = "3.11"
+strict = true
+# agentgauge ships a py.typed marker, which promises downstream consumers --
+# anyone writing a third-party rule against FileContext -- that these
+# annotations are real. CI enforces that promise instead of just making it.
+files = ["agentgauge"]

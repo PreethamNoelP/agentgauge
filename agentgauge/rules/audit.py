@@ -19,7 +19,9 @@ RULE_ID = "audit-logging"
 CATEGORY = "Audit logging"
 WEIGHT = 20
 
-LOG_TOKENS = {"log", "logger", "logging", "logged", "audit", "auditing", "audited"}
+LOG_TOKENS = frozenset(
+    {"log", "logger", "logging", "logged", "audit", "auditing", "audited"}
+)
 
 
 def _makes_log_call(

@@ -15,6 +15,7 @@ does not run when a module-level call executes, so it must not satisfy it.
 """
 
 import ast
+from typing import Iterator
 
 from agentgauge.astutils import (
     FileContext,
@@ -45,7 +46,7 @@ def _decorator_name(dec: ast.expr) -> str | None:
     return dotted_name(target)
 
 
-def _test_markers(test: ast.expr):
+def _test_markers(test: ast.expr) -> Iterator[str]:
     """Identifiers actually referenced by a test expression: Name and
     Attribute nodes only -- not keyword-argument names of a call inside
     it. A keyword name describes an unrelated call's own parameter, not

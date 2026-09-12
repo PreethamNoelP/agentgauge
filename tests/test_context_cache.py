@@ -4,7 +4,6 @@ not walk the same subtrees a dozen times -- a performance change that
 silently altered the site population would be far worse than a slow scan.
 """
 
-import ast
 from pathlib import Path
 
 import pytest

@@ -16,6 +16,7 @@ import os
 import tomllib
 from dataclasses import dataclass, field
 from pathlib import Path
+from typing import Any
 
 from agentgauge.rules import RULE_IDS
 
@@ -86,13 +87,13 @@ class Config:
     source: str | None = None
 
 
-def _as_str_tuple(value, key: str) -> tuple[str, ...]:
+def _as_str_tuple(value: object, key: str) -> tuple[str, ...]:
     if not isinstance(value, list) or not all(isinstance(v, str) for v in value):
         raise ConfigError(f"[tool.agentgauge] '{key}' must be a list of strings")
     return tuple(value)
 
 
-def _as_vocabulary(value, key: str) -> tuple[str, ...]:
+def _as_vocabulary(value: object, key: str) -> tuple[str, ...]:
     """A vocabulary list, rejecting entries too short to be words. See
     _MIN_VOCAB_LENGTH: a one- or two-character marker is a wildcard that
     silently makes its rule pass everywhere."""
@@ -108,8 +109,8 @@ def _as_vocabulary(value, key: str) -> tuple[str, ...]:
     return entries
 
 
-def _build_rule_config(table: dict) -> RuleConfig:
-    kwargs = {}
+def _build_rule_config(table: dict[str, Any]) -> RuleConfig:
+    kwargs: dict[str, Any] = {}
 
     disabled = _as_str_tuple(table.get("disabled_rules", []), "disabled_rules")
     unknown = sorted(set(disabled) - set(RULE_IDS))
@@ -140,7 +141,7 @@ def _build_rule_config(table: dict) -> RuleConfig:
     return RuleConfig(**kwargs)
 
 
-def _parse(data: dict, source: str | None = None) -> Config:
+def _parse(data: dict[str, Any], source: str | None = None) -> Config:
     tool = data.get("tool", {})
     table = tool.get("agentgauge", {}) if isinstance(tool, dict) else {}
     if not isinstance(table, dict):

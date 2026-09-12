@@ -12,6 +12,7 @@ import re
 import tokenize
 from dataclasses import dataclass, field
 from functools import cached_property
+from typing import Iterator
 
 from agentgauge.config import RuleConfig
 
@@ -125,7 +126,9 @@ SENSITIVE_SUFFIX: dict[str, str] = {
 # able to average this away (score averaging otherwise dilutes one
 # catastrophic site across many low-risk ones -- see "critical-site
 # dilution" in RULES.md).
-CRITICAL_LABELS = {"file delete", "shell exec", "code exec", "payment", "remote delete"}
+CRITICAL_LABELS = frozenset(
+    {"file delete", "shell exec", "code exec", "payment", "remote delete"}
+)
 
 
 def is_critical(label: str) -> bool:
@@ -191,7 +194,9 @@ def sensitive_label(call: ast.Call, aliases: dict[str, str] | None = None) -> st
     return None
 
 
-def iter_sensitive_calls(tree: ast.AST, aliases: dict[str, str] | None = None):
+def iter_sensitive_calls(
+    tree: ast.AST, aliases: dict[str, str] | None = None
+) -> Iterator[tuple[ast.Call, str]]:
     """Yield (call_node, action_label) for every sensitive call in the tree."""
     for node in ast.walk(tree):
         if isinstance(node, ast.Call):
@@ -263,7 +268,7 @@ def build_import_aliases(tree: ast.AST) -> dict[str, str]:
     return aliases
 
 
-def iter_scope(scope: ast.AST):
+def iter_scope(scope: ast.AST) -> Iterator[ast.AST]:
     """Yield `scope` and every descendant that executes in the *same* scope.
 
     Nested def/async def bodies are separate scopes and are not entered: a
@@ -488,14 +493,14 @@ class FileContext:
         return rules is None or rule in rules
 
 
-def iter_functions(tree: ast.AST):
+def iter_functions(tree: ast.AST) -> Iterator["FunctionNode"]:
     """Yield every def/async def in the tree, nested ones included."""
     for node in ast.walk(tree):
         if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
             yield node
 
 
-def iter_identifiers(scope: ast.AST):
+def iter_identifiers(scope: ast.AST) -> Iterator[str]:
     """Yield every identifier-ish string in a subtree: variable names,
     attribute accesses, def/class names, parameters, keyword-arg names.
     Rules match governance vocabulary ("approv", "throttle") against these."""

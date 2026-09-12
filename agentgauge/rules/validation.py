@@ -9,9 +9,11 @@ named parameter is invisible, and an unrecognized validator doesn't count.
 """
 
 import ast
+from typing import Iterator
 
 from agentgauge.astutils import (
     FileContext,
+    FunctionNode,
     call_name,
     dotted_name,
     name_tokens,
@@ -22,22 +24,22 @@ RULE_ID = "input-validation"
 CATEGORY = "Tool scope & input validation"
 WEIGHT = 15
 
-RISKY_PARAM_TOKENS = {
+RISKY_PARAM_TOKENS = frozenset({
     "path", "file", "filename", "dir", "directory",
     "cmd", "command", "shell",
     "query", "sql",
     "url", "uri", "host", "endpoint",
     "target", "dest", "destination",
-}
+})
 
-VALIDATION_TOKENS = {
+VALIDATION_TOKENS = frozenset({
     "validate", "validated", "validation",
     "sanitize", "sanitized",
     "check", "checked",
     "verify", "verified",
     "allowed", "allowlist", "whitelist",
     "escape", "quote",
-}
+})
 
 
 def _names_in(node: ast.AST) -> set[str]:
@@ -99,7 +101,9 @@ def _annotation_is_constrained(annotation: ast.expr | None) -> bool:
     return False
 
 
-def _risky_params(fn, risky_param_tokens: frozenset[str]):
+def _risky_params(
+    fn: FunctionNode, risky_param_tokens: frozenset[str]
+) -> Iterator[ast.arg]:
     for arg in [*fn.args.posonlyargs, *fn.args.args, *fn.args.kwonlyargs]:
         if arg.arg in ("self", "cls"):
             continue

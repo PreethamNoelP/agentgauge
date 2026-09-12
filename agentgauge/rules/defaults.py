@@ -9,6 +9,7 @@ can't judge a value we can't see.
 """
 
 import ast
+from typing import Iterator
 
 from agentgauge.astutils import FileContext
 from agentgauge.models import Finding
@@ -19,29 +20,29 @@ WEIGHT = 10
 
 # Matched against lowercased names with underscores/hyphens stripped, so
 # auto_approve, AUTO_APPROVE and autoApprove all hit "autoapprove".
-DANGEROUS_WHEN_TRUE = {
+DANGEROUS_WHEN_TRUE = frozenset({
     "autoapprove", "autoconfirm", "autoaccept", "autorun", "autoexecute",
     "skipapproval", "skipconfirm", "skipconfirmation", "skipreview",
     "noconfirm", "noapproval",
     "allowall", "trustall", "unsafe",
     "disableauth", "disablesafety", "bypassapproval", "bypasssafety",
-}
+})
 
-DANGEROUS_WHEN_FALSE = {
+DANGEROUS_WHEN_FALSE = frozenset({
     "requireapproval", "approvalrequired",
     "requireconfirmation", "confirmationrequired", "requireconfirm",
     "requireauth", "authrequired",
     "requirehuman", "humanintheloop", "humanreview",
     "verify", "verifyssl", "sslverify",
     "safemode", "sandbox", "sandboxed",
-}
+})
 
 
 def _collapsed(name: str) -> str:
     return name.lower().replace("_", "").replace("-", "")
 
 
-def _flag_bindings(tree: ast.AST):
+def _flag_bindings(tree: ast.AST) -> Iterator[tuple[str, ast.expr, int]]:
     """Yield (name, value_node, lineno) for every name-to-value binding:
     assignments, keyword arguments, parameter defaults, and dict entries
     with a literal string key."""
@@ -76,9 +77,13 @@ def _flag_bindings(tree: ast.AST):
             defaults = node.args.defaults
             for arg, default in zip(pos[len(pos) - len(defaults):], defaults):
                 yield arg.arg, default, arg.lineno
-            for arg, default in zip(node.args.kwonlyargs, node.args.kw_defaults):
-                if default is not None:
-                    yield arg.arg, default, arg.lineno
+            # A separate name from `default` above: kw_defaults is
+            # list[expr | None] (a keyword-only arg with no default is a
+            # None slot), and reusing the name would widen the other loop's
+            # type for no reason.
+            for arg, kw_default in zip(node.args.kwonlyargs, node.args.kw_defaults):
+                if kw_default is not None:
+                    yield arg.arg, kw_default, arg.lineno
 
 
 def check(ctx: FileContext) -> tuple[int, int, list[Finding]]:
