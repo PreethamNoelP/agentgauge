@@ -33,6 +33,14 @@ not ordinary bugs:
    verdict is the one guarantee this tool makes; see
    `ScanReport.verdict`.
 
+   This includes making agentgauge report a confident `PASS` over code it
+   never actually examined. A scan with zero applicable sites is
+   `INCOMPLETE` for that reason: previously an `exclude` pattern covering
+   the only file with sinks produced a 100.0/100 `PASS` and exit `0` under
+   `--min-score 100 --fail-on-incomplete`. No warning a CI consumer reads
+   is a substitute for the exit code, so "the warning was on stderr" does
+   not close a report of this shape.
+
 ## What does not count
 
 - **A missed finding (false negative).** agentgauge is a documented set of

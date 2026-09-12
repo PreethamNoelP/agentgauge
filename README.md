@@ -32,6 +32,7 @@ scanned 1 Python file(s)
   ----------------------------------------------------------
   GOVERNANCE SCORE                     0.0 / 100
   VERDICT                           FAIL_CRITICAL
+  APPLICABLE SITES                  44
 
 Findings (44):
 
@@ -72,7 +73,7 @@ What makes it different:
 
 - **Site-based scoring, not file-based.** A category's score is the fraction of *applicable* sites that pass — a category with zero applicable sites scores full marks, because you can't fail a check that never applied.
 - **Two-tier verdict, not just a score.** The 0-100 score is an average across every site, which means one catastrophic miss can hide behind a hundred compliant ones — 99 fully-governed payment tools and 1 with no approval check still average out to 99.75/100. So alongside the score, every scan produces a `verdict`: `PASS`, `FAIL_CRITICAL`, or `INCOMPLETE`. A single ungated **critical** action — payment, file deletion, shell exec, code exec, remote delete — sets `FAIL_CRITICAL` and fails CI outright, independent of `--min-score` and no matter how high the aggregate score climbs. The score tells you your general posture; the verdict tells you whether to ship.
-- **Nothing can quietly buy back that verdict.** Not a high score, not an inline suppression comment, not a config file that switches off the rule the gate depends on. Each of those was a real hole; each is now closed and regression-tested.
+- **Nothing can quietly buy back that verdict.** Not a high score, not an inline suppression comment, not a config file that switches off the rule the gate depends on, and not an empty result: a scan that recognized *nothing* scores a perfect 100 by arithmetic, and now reports `INCOMPLETE` rather than `PASS`. Each of those was a real hole; each is now closed and regression-tested.
 - **Honest about its limits.** Every heuristic's blind spots are documented in [RULES.md](RULES.md) — including the ones that are embarrassing, and including the fact that 50 of the 100 points rest on governance *vocabulary* appearing near a tool function rather than on proof it does anything. That is why the verdict, not the score, is what belongs in a CI gate. A governance tool that hides its own blind spots would fail its own audit.
 - **Built for CI from day one.** Deterministic exit codes, deterministic output, `--min-score` gating, `--fail-on-incomplete`, JSON and SARIF.
 
@@ -86,6 +87,7 @@ What makes it different:
 - 📦 **JSON or SARIF 2.1.0** — pipe reports into dashboards, bots, PR comments, or GitHub/GitLab code scanning
 - ⚙️ **Configurable, never overridable** — `[tool.agentgauge]` in pyproject.toml adds project vocabulary, excludes, and disables categories; it can never make a rule stop recognizing its built-in defaults, and a config that would neuter a rule is rejected rather than honored
 - 🙈 **Inline suppression** — `# agentgauge: ignore[rule-id]` for incremental adoption, without ever weakening `FAIL_CRITICAL`
+- 🕳️ **Refuses to pass on nothing** — a scan that recognized no governance-relevant code reports `INCOMPLETE`, not a vacuous 100/100; `APPLICABLE SITES` is printed next to every score
 - 🐕 **Dogfooded, including the negative case** — CI fails if the vulnerable fixture ever stops being detected
 
 ## 🔌 What leaves your machine: nothing
@@ -156,8 +158,8 @@ Design decisions that matter:
 | 🌳 Analysis | `ast` + `tokenize` standard-library modules — pure static parsing |
 | ⚙️ Config | `tomllib` standard-library module — `[tool.agentgauge]` in pyproject.toml |
 | 🖥️ CLI | `argparse`, human + `--json` + `--sarif` renderers |
-| ✅ Testing | `pytest` — 880+ unit, per-rule, invariant, and integration tests |
-| 🔁 CI/CD | GitHub Actions, 6-entry matrix + four dogfood gates |
+| ✅ Testing | `pytest` — 900+ unit, per-rule, invariant, and integration tests; `mypy --strict` and `ruff` in CI |
+| 🔁 CI/CD | GitHub Actions, 6-entry matrix + a lint/type job + five dogfood gates |
 | 📦 Runtime deps | **None.** |
 
 ## 📊 How It Works
@@ -175,6 +177,17 @@ Exit codes (the CI contract):
 | `0` | scan completed, met `--min-score` (if given), and verdict is not `FAIL_CRITICAL` |
 | `1` | score below `--min-score`, **or** verdict is `FAIL_CRITICAL`, **or** verdict is `INCOMPLETE` and `--fail-on-incomplete` was passed |
 | `2` | bad invocation: target missing, **zero Python files scanned**, or a malformed/unrecognized `[tool.agentgauge]` config — a score over zero evidence, or over a config agentgauge couldn't understand, is never reported as a pass |
+
+`INCOMPLETE` covers three things, all of them "this scan cannot support a
+`PASS`": a file that could not be parsed, a config-disabled critical-gate
+rule, and **a scan that found zero applicable sites**. That last one used
+to report `PASS`: because every category scores full marks when it never
+applied, a repo agentgauge recognized nothing in scored a clean 100.0/100
+and exited `0` even under `--min-score 100 --fail-on-incomplete`. Reaching
+that took no hostile intent — an agent codebase built on an SDK whose
+sinks aren't in our tables gets there, and so does an `exclude` pattern
+that happens to cover the one file that mattered. The report now prints
+`APPLICABLE SITES` next to the score so the denominator is never invisible.
 
 ## 🛠️ Installation & Setup
 
@@ -194,6 +207,8 @@ $ git clone https://github.com/PreethamNoelP/agentgauge.git
 $ cd agentgauge
 $ pip install -e ".[dev]"
 $ python -m pytest tests/ -q
+$ mypy                                     # --strict, enforced in CI
+$ ruff check agentgauge/ tests/
 ```
 
 ## ▶️ Usage
@@ -245,35 +260,58 @@ malformed marker suppresses nothing rather than everything. See
 
 ### GitHub Actions
 
-As a gate:
+agentgauge ships as an action, so the gate is one step:
 
 ```yaml
-- name: Governance scan
-  run: |
-    pip install git+https://github.com/PreethamNoelP/agentgauge.git
-    agentgauge . --min-score 70 --fail-on-incomplete
+- uses: PreethamNoelP/agentgauge@v0.1.0
+  with:
+    path: .
+    min-score: "70"
+    fail-on-incomplete: "true"
 ```
 
-Or into GitHub code scanning:
+Or into GitHub code scanning — one run both gates the build and writes the
+report, because SARIF output still carries the governance exit code:
 
 ```yaml
-- name: Governance scan (SARIF)
-  run: |
-    pip install git+https://github.com/PreethamNoelP/agentgauge.git
-    agentgauge . --sarif > agentgauge.sarif || true
+- uses: PreethamNoelP/agentgauge@v0.1.0
+  with:
+    sarif-file: agentgauge.sarif
+  continue-on-error: true          # let the upload run even on a red gate
 - uses: github/codeql-action/upload-sarif@v3
   with:
     sarif_file: agentgauge.sarif
 ```
 
+The action installs agentgauge from its own checkout, so the version that
+runs is exactly the ref you pinned — nothing is resolved at run time.
+
+### pre-commit
+
+```yaml
+repos:
+  - repo: https://github.com/PreethamNoelP/agentgauge
+    rev: v0.1.0
+    hooks:
+      - id: agentgauge
+        args: [--min-score, "70", --fail-on-incomplete]
+```
+
+The hook scans the whole repository rather than the staged files, and that
+is deliberate: a category's score is `passed / applicable sites` across the
+scan, so restricting it to one commit's files would compute the percentage
+against a different denominator every time — and an ungated sink in an
+untouched file would go unreported.
+
 > Scanning agentgauge's own repository will flag `tests/fixtures/vulnerable_server.py` — it is *supposed* to be terrifying. The repo's own `[tool.agentgauge]` table excludes `tests/`, and CI gates the fixtures separately.
 
 ## 📈 Results & Validation
 
-- ✅ **880+ tests, 100% passing, < 2 s** — per-module, per-rule, invariant/property, and end-to-end integration
+- ✅ **900+ tests, 100% passing, < 4 s** — per-module, per-rule, invariant/property, and end-to-end integration
+- 🧷 **`mypy --strict` clean and `ruff` clean, enforced in CI** — the package ships a `py.typed` marker, and an unverified marker is exactly the kind of unchecked claim agentgauge exists to complain about
 - 🎯 **Calibrated end to end** — a deliberately vulnerable fixture scores exactly **0.0/100** (44 findings across all six categories); a deliberately hardened one scores exactly **100.0/100** with every category having at least one site. Both ends of the range are pinned, not theoretical.
 - 🧪 **Property tests, not just examples** — `sites == passed + findings` for every rule over a 45-snippet corpus (match statements, `except*`, walrus, unicode identifiers, async comprehensions), score bounds, byte-identical output across repeated runs, and a pinned JSON key contract
-- 🐕 **Four dogfood gates in CI** — own source scores 100 with a complete scan; the clean fixture is not a false positive; **the vulnerable fixture still fails** (the gate that catches a silent detection regression); JSON and SARIF parse and a hostile repo doesn't crash the scan
+- 🐕 **Five dogfood gates in CI** — own source is finding-free; the clean fixture scores 100 *against 24 real sites*; **the vulnerable fixture still fails** (the gate that catches a silent detection regression); a scan that recognized nothing cannot report `PASS`; JSON and SARIF parse and a hostile repo doesn't crash the scan
 - 🪟 **Linux and Windows in CI** — path handling, glob case sensitivity and encoding detection have all been platform-specific bugs here
 
 ## 🔍 Challenges & Learnings
@@ -293,11 +331,13 @@ Real problems this project had to solve — documented with their remaining limi
 
 - [x] **Configurable vocabularies** — custom approval / logging / rate-limit / validation / flag-name keyword lists via `[tool.agentgauge]`
 - [x] **Type-annotation evidence** — `Literal[...]` and `Annotated[..., Field(...)]` count as validation proof
-- [x] **Alias resolution** — `import x as y`, `from x import y`, and one hop of rebinding
+- [x] **Alias resolution** — `import x as y`, `from x import y`, and rebinding chains resolved in document order
 - [x] **Enforcing-position analysis** — approval vocabulary must gate execution, in the call's own scope
 - [x] **Inline suppression** — `# agentgauge: ignore[rule-id]`, without weakening `FAIL_CRITICAL`
 - [x] **SARIF output** — `--sarif` with a full invocation record for code-scanning ingestion
+- [x] **GitHub Action and pre-commit hook** — `uses: PreethamNoelP/agentgauge@v0.1.0`, or a `.pre-commit-config.yaml` entry
 - [ ] **Publish to PyPI** — plain `pip install agentgauge`, no git URL needed
+- [ ] **Baseline file** — `--baseline` so an existing repo can adopt agentgauge without fixing every finding on day one. Needs a decision first: a baseline that can silence a *critical* finding would be the one thing this tool promises cannot happen, and one that cannot is useless to exactly the repos that need it most
 - [ ] **Config-file scanning** — catch permissive defaults living in `claude_desktop_config.json`, `mcp.json`, …
 - [ ] **Pydantic/FastMCP schema awareness** — validate declared input models, not just parameters (the largest remaining rule-5 blind spot)
 - [ ] **Cross-module resolution** — a sink gated by a helper in another file is currently a false failure

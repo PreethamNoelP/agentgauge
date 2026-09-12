@@ -10,9 +10,18 @@ $ git clone https://github.com/PreethamNoelP/agentgauge.git
 $ cd agentgauge
 $ pip install -e ".[dev]"
 $ python -m pytest tests/ -q
+$ mypy                            # --strict, configured in pyproject.toml
+$ ruff check agentgauge/ tests/
 ```
 
-Python 3.11+ and no other runtime dependency.
+Python 3.11+ and no other runtime dependency. `mypy` and `ruff` are
+dev-only and both gate CI: the package ships a `py.typed` marker, which
+promises anyone writing a third-party rule that the annotations are real,
+and an unenforced promise is how it silently stops being true.
+
+`tests/fixtures/` is excluded from ruff. Those files are scanner *input* —
+they reference undefined names on purpose because they are only ever
+`ast.parse`d, never imported — so their F821s are the point of the files.
 
 ## The bar for a change
 
@@ -67,7 +76,10 @@ Invariants your rule must keep, because scoring relies on them:
 - `sites == passed + len(findings)`. Every applicable place is either
   compliant or has exactly one finding.
 - Zero sites means the rule did not apply, which scores full marks. Never
-  report a site you cannot judge.
+  report a site you cannot judge. Note the scan-level consequence: if
+  *every* rule reports zero sites the scan has proved nothing, so its
+  verdict is `INCOMPLETE` rather than a vacuous 100/100 `PASS`. A rule that
+  invents sites to avoid looking inapplicable breaks that guarantee.
 - `critical=True` only for consequences that must fail a build on their
   own. A new source of critical findings means updating
   `CRITICAL_GATE_RULES` in `scoring.py`, or the verdict will not know the

@@ -10,6 +10,80 @@ explicitly.
 
 ## [Unreleased]
 
+### Fixed — the verdict (this changes CI outcomes)
+
+- **A scan with zero applicable sites reported `PASS`.** Every category
+  scores full marks when it never applied, so a repository agentgauge
+  recognized nothing in scored exactly 100.0/100 and exited `0` — even
+  under `--min-score 100 --fail-on-incomplete`, the strictest invocation
+  available. The verdict is now `INCOMPLETE`, which `--fail-on-incomplete`
+  turns into a red build.
+
+  Two realistic routes reached this without any hostile intent: an agent
+  codebase built on an SDK whose sinks are not in our tables, and an
+  `exclude` pattern that happened to cover the only file that mattered.
+  The second was the more serious one — `disabled_rules` had already been
+  blocked from neutering the gate, but `exclude` could still do it, and
+  excluding the deliberately-vulnerable fixture (44 findings,
+  `FAIL_CRITICAL`) produced a clean 100.0/100 `PASS`.
+
+  **This can change an existing pipeline from green to red**, and where it
+  does, the previous green was not meaningful. If a repository genuinely
+  has no agent tool-calling code, drop `--fail-on-incomplete` for it rather
+  than treating 100/100 as a governance result.
+
+### Added
+
+- Excluded files are counted and reported: `excluded` in JSON and SARIF, an
+  `EXCLUDED BY CONFIG` line in the human report, and a stderr warning.
+  Config exclusions do **not** by themselves make a scan `INCOMPLETE` —
+  excluding files is a project decision, not a coverage gap — but the
+  report no longer hides that they happened.
+- `APPLICABLE SITES` is printed next to the governance score. A 100.0 over
+  0 sites and a 100.0 over 200 are the same number and entirely different
+  claims; the denominator is no longer invisible in the human output.
+- A GitHub composite action (`action.yml`) and a pre-commit hook
+  (`.pre-commit-hooks.yaml`). The action installs from its own checkout, so
+  the version that runs is exactly the ref the caller pinned. A single
+  action run both gates the build and writes SARIF, because SARIF output
+  already carries the governance exit code.
+
+### Changed
+
+- `mypy --strict` and `ruff` now gate CI, and the package is clean under
+  both. agentgauge ships a `py.typed` marker; that marker was previously an
+  unverified claim, and `mypy --strict` reported 31 errors against it —
+  including two real type mismatches where a `set[str]` was passed to a
+  parameter declared `frozenset[str]`.
+- Rule vocabulary tables (`LOG_TOKENS`, `VALIDATION_TOKENS`,
+  `RISKY_PARAM_TOKENS`, `DANGEROUS_WHEN_TRUE`/`_FALSE`, `CRITICAL_LABELS`,
+  `_EXIT_CALLS`) are `frozenset`s. They are module-level constants that
+  nothing should mutate, and it makes the set-union types line up.
+- Removed a dead `hasattr(ast, "TryStar")` compatibility branch: `TryStar`
+  has existed since 3.11, which is this package's floor.
+- CI's self-scan gate no longer asserts `--min-score 100
+  --fail-on-incomplete` on agentgauge's own source. That gate passed for a
+  reason it did not advertise — agentgauge's own source has zero sites, so
+  it was asserting arithmetic over an empty set. It now asserts what is
+  actually true (no findings, nothing skipped), the clean fixture carries
+  the "scores 100 against 24 real sites" claim, and a new gate pins that a
+  scan recognizing nothing cannot report `PASS`.
+
+### Performance
+
+- ~15% faster scans, with byte-identical findings, score and verdict.
+  `build_import_aliases` made two full `ast.walk` passes over every file
+  and now makes one (imports are collected and assignments set aside in the
+  same pass, preserving the document-order resolution a rebinding chain
+  depends on); `functions` and `sensitive_calls` each walked the whole tree
+  and now share a single pass. Measured best-of-5 on a 517-file / 77k-LOC
+  corpus: 1.99 s → 1.69 s.
+- `RULES.md`'s performance table is re-measured and now states its method.
+  The previous figures (~25 s for 123k LOC, ~57 s for a 960-file stdlib
+  tree) were roughly 6× high: that workload is millions of tiny `ast.walk`
+  calls, which is precisely what a deterministic profiler over-charges.
+  The 960-file tree is ~13 s.
+
 ### Fixed — detection (these change scores)
 
 - `from subprocess import run; run(cmd, shell=True)`, and every other plain

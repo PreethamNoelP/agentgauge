@@ -21,13 +21,23 @@ Category points = `weight × passed / sites`. Consequences:
    (typo'd path, pure-JS repo, everything unparseable), the CLI refuses to
    print a score and exits `2`. A 100/100 earned by looking at nothing must
    never look like a passing grade in CI.
-3. **Zero *sites* → a score you should read carefully.** A repo with files
-   but no sensitive calls, tool functions or governance flags scores
-   100/100 by rule 1, six times over. That is the correct arithmetic and a
-   misleading headline, so the report says so: `total_sites: 0` in JSON, and
-   a warning on stderr — *"this score reflects the absence of anything to
-   check, not evidence of governance."* Treat it as "agentgauge found no
-   agent tool-calling code here", not as a clean bill of health.
+3. **Zero *sites* → `INCOMPLETE`, never `PASS`.** A repo with files but no
+   sensitive calls, tool functions or governance flags scores 100/100 by
+   rule 1, six times over. That is the correct arithmetic and a misleading
+   headline, so it is not allowed to read as a pass: the verdict is
+   `INCOMPLETE`, `total_sites: 0` appears in JSON and in the human report,
+   and stderr says *"this score reflects the absence of anything to check,
+   not evidence of governance."* Treat it as "agentgauge found no agent
+   tool-calling code here", not as a clean bill of health.
+
+   This was a real hole rather than a theoretical one. Because
+   `--fail-on-incomplete` only looked at unparseable files and disabled
+   rules, a repo agentgauge recognized nothing in exited **0** under
+   `--min-score 100 --fail-on-incomplete` — the strictest invocation
+   available — and printed `VERDICT PASS`. Reaching it took no hostile
+   intent: an agent codebase built on an SDK whose sinks are not in our
+   tables gets there, and so does an `exclude` pattern that happens to
+   cover the one file that mattered.
 4. **Averaging can't buy back a critical miss** (*critical-site
    dilution*, the name used for this in code comments). The score is an average
    across sites, so one catastrophic site can be diluted by many compliant
@@ -37,11 +47,21 @@ Category points = `weight × passed / sites`. Consequences:
    `shell exec`, `code exec`, `remote delete` — see `astutils.is_critical`)
    sets `FAIL_CRITICAL`, which fails CI regardless of `--min-score` or how
    high the aggregate score is.
-5. **A partial or gate-less scan is not a PASS.** `INCOMPLETE` means either
-   a file couldn't be parsed, or config disabled a rule the gate depends on
-   (see *Configuration*). Either way agentgauge did not see everything it
-   claims to cover. `INCOMPLETE` exits 0 by default; pass
-   `--fail-on-incomplete` to make CI treat reduced coverage as a failure.
+5. **A partial, gate-less or empty scan is not a PASS.** `INCOMPLETE` means
+   one of three things: a file couldn't be parsed, config disabled a rule
+   the gate depends on (see *Configuration*), or the scan found zero
+   applicable sites. In each case agentgauge did not see — or did not
+   recognize — everything it claims to cover, so it has nothing to base a
+   `PASS` on. `INCOMPLETE` exits 0 by default; pass `--fail-on-incomplete`
+   to make CI treat reduced coverage as a failure.
+
+   Config `exclude` patterns deliberately do **not** make a scan
+   `INCOMPLETE` — excluding files is a project decision, not a gap
+   agentgauge hit by accident. They are instead *counted*: `excluded` in
+   JSON and SARIF, an `EXCLUDED BY CONFIG` line in the human report, and a
+   warning on stderr. An exclude that hides everything worth checking still
+   fails the gate, because the resulting scan has zero sites and rule 3
+   above applies.
 
 | Category | Weight | Sites are... | Evidence is... |
 |---|---|---|---|
@@ -525,19 +545,33 @@ back to a file in the repository. Run agentgauge from the repository root.
 Single-pass-per-question AST analysis, one file resident at a time, no I/O
 beyond reading sources. Measured on this implementation:
 
-| Corpus | Files | Time |
-|---|---|---|
-| 123k LOC of dense tool code | 600 | ~25 s |
-| CPython's own standard library | 960 | ~57 s |
-| A typical MCP server repo (a few thousand LOC) | tens | < 1 s |
+| Corpus | Files | LOC | Sites | Time |
+|---|---|---|---|---|
+| A typical MCP server repo | tens | a few thousand | tens | < 0.1 s |
+| `llama_index` (sparse: few sinks) | 517 | 77k | 69 | ~1.7 s |
+| A full stdlib tree (dense: many sinks) | 960 | 132k | 1466 | ~13 s |
+
+Measured best-of-3, warm filesystem cache, timing `scan()` only —
+interpreter startup and JSON serialization excluded. Reproduce with
+`python -m agentgauge <path>`; note that a single cold-cache run through
+the CLI can read several times higher, and that running under `cProfile`
+inflates these numbers roughly 6× because the workload is millions of very
+small `ast.walk` calls, which is exactly what a deterministic profiler
+charges most for. Measure with a wall clock, not a profiler.
+
+The two corpora differ by 8× per LOC, and the reason is the *sites* column,
+not the file count: per-file work is dominated by what happens once a sink
+is found (building the parent map, scanning enclosing scopes), so a dense
+corpus costs far more per line than a sparse one. Reading and parsing
+alone is ~⅓ of the dense figure and is an irreducible floor.
 
 Peak memory is a single file's AST — flat regardless of repo size.
 
-Roughly 5,000 LOC/s is pure-Python-with-`ast` territory, not
-compiled-linter territory: `ast.walk` is the whole cost, and six
-independent rules each asking their own questions is the architecture's
-price for being easy to extend. `FileContext` caches the views the rules
-share (`functions`, `sensitive_calls`, `tool_functions`, `parents`), which
-is what makes it 5,000 rather than 2,000 LOC/s. For a very large monorepo,
-scope the scan with `exclude` or point it at the directories that actually
-hold agent code.
+Where the remaining time goes, on the dense corpus: `permissive-defaults`
+and `error-handling` are ~2.8 s each, the other four rules ~2 s combined.
+Both hot rules walk the whole tree for themselves; folding them into the
+shared per-file walk is the obvious next optimization and is not done,
+because the corpus that makes it worth 6% is a stdlib tree rather than
+anything agentgauge is aimed at. For a very large monorepo, scope the scan
+with `exclude` or point it at the directories that actually hold agent
+code.
