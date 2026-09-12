@@ -67,7 +67,14 @@ version = { attr = "agentgauge.__version__" }
 # harness, not agent tool-calling code -- and tests/fixtures/ is
 # deliberately vulnerable by design. CI gates the fixtures separately:
 # the clean one must score 100, the vulnerable one must exit 1.
-exclude = ["tests/*"]
+#
+# docs/vendor/ is excluded for both of those reasons at once. It holds a
+# synced copy of the package (scanning it would double-count every module
+# against itself) and the playground's demo inputs, one of which is
+# deliberately vulnerable in exactly the way tests/fixtures is. Without
+# this the self-scan reports 49 findings and FAIL_CRITICAL against its own
+# documentation directory.
+exclude = ["tests/*", "docs/vendor/*"]
 
 [tool.ruff]
 target-version = "py311"
@@ -77,7 +84,11 @@ line-length = 88
 # process_next) because they are only ever parsed by ast.parse, never
 # imported or executed. Linting them reports 33 F821s that are the point of
 # the files. Everything else, including the tests themselves, is linted.
-extend-exclude = ["tests/fixtures"]
+#
+# docs/vendor is excluded for the same reason plus one more: it is a synced
+# copy of the package, so linting it reports every finding twice and invites
+# someone to "fix" the copy instead of the source it is pinned to.
+extend-exclude = ["tests/fixtures", "docs/vendor"]
 
 [tool.mypy]
 python_version = "3.11"
