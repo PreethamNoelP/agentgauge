@@ -1,0 +1,88 @@
+name: agentgauge
+description: Static governance scan for MCP servers and AI agent tool-calling code.
+author: Preetham Noel P
+
+branding:
+  icon: shield
+  color: green
+
+inputs:
+  path:
+    description: File or directory to scan.
+    required: false
+    default: "."
+  min-score:
+    description: >-
+      Fail if the governance score is below this. Left empty, only the
+      verdict gates the build -- which is the recommended setup: the score
+      is a trend line, the verdict is the load-bearing output (see RULES.md).
+    required: false
+    default: ""
+  fail-on-incomplete:
+    description: >-
+      Fail on an INCOMPLETE verdict: a file that could not be parsed, a
+      disabled critical-gate rule, or a scan that found zero applicable
+      sites and therefore proved nothing.
+    required: false
+    default: "false"
+  sarif-file:
+    description: >-
+      Write a SARIF 2.1.0 report here instead of human-readable output, for
+      github/codeql-action/upload-sarif. The step still exits with the
+      governance exit code, so one run both reports and gates.
+    required: false
+    default: ""
+  config:
+    description: Explicit TOML config path, instead of pyproject.toml discovery.
+    required: false
+    default: ""
+
+runs:
+  using: composite
+  steps:
+    - name: Install agentgauge
+      shell: bash
+      # Installed from the action's own checkout ($GITHUB_ACTION_PATH), not
+      # from PyPI or a git URL: the version that runs is exactly the ref the
+      # caller pinned with `uses:`, with nothing resolved at runtime.
+      run: python -m pip install --disable-pip-version-check "$GITHUB_ACTION_PATH"
+
+    - name: Run agentgauge
+      shell: bash
+      env:
+        AG_PATH: ${{ inputs.path }}
+        AG_MIN_SCORE: ${{ inputs.min-score }}
+        AG_FAIL_INCOMPLETE: ${{ inputs.fail-on-incomplete }}
+        AG_SARIF: ${{ inputs.sarif-file }}
+        AG_CONFIG: ${{ inputs.config }}
+      # Inputs are passed as environment variables and appended with `+=`
+      # rather than interpolated into the script body: `${{ }}` expansion
+      # happens before bash sees the line, so an input containing quotes or
+      # a semicolon would otherwise be able to inject shell commands into a
+      # workflow that merely used this action.
+      run: |
+        args=("$AG_PATH")
+        # Written as `if` blocks rather than `[ -n "$X" ] && args+=(...)`:
+        # under `bash -e` the shorthand's exit status is the failed test
+        # whenever the input is empty, which is a documented foot-gun this
+        # repo has already been bitten by once (see the dogfood job).
+        if [ -n "$AG_MIN_SCORE" ]; then
+          args+=(--min-score "$AG_MIN_SCORE")
+        fi
+        if [ "$AG_FAIL_INCOMPLETE" = "true" ]; then
+          args+=(--fail-on-incomplete)
+        fi
+        if [ -n "$AG_CONFIG" ]; then
+          args+=(--config "$AG_CONFIG")
+        fi
+
+        if [ -n "$AG_SARIF" ]; then
+          mkdir -p "$(dirname "$AG_SARIF")"
+          # Redirect, never a pipe: `run:` executes under `bash -e`, so a
+          # pipeline would abort the step on agentgauge's own non-zero
+          # governance exit before the code could be inspected.
+          agentgauge "${args[@]}" --sarif > "$AG_SARIF" && code=0 || code=$?
+        else
+          agentgauge "${args[@]}" && code=0 || code=$?
+        fi
+        exit "$code"
