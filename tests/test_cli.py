@@ -414,3 +414,105 @@ def test_closed_stdout_pipe_on_sarif_is_survivable(tmp_path, monkeypatch):
     _break_the_pipe(monkeypatch)
 
     assert main([str(tmp_path), "--sarif"]) == 0
+
+
+# --- baseline mode ---
+
+
+def test_update_baseline_without_baseline_flag_is_a_usage_error(tmp_path, capsys):
+    (tmp_path / "ok.py").write_text("x = 1\n")
+
+    with pytest.raises(SystemExit) as exc_info:
+        main([str(tmp_path), "--update-baseline"])
+
+    assert exc_info.value.code == 2
+    assert "--update-baseline requires --baseline" in capsys.readouterr().err
+
+
+def test_update_baseline_writes_current_findings_and_exits_zero(tmp_path, capsys):
+    (tmp_path / "bad.py").write_text("auto_approve = True\n")
+    baseline_path = tmp_path / "baseline.json"
+
+    code = main(
+        [str(tmp_path), "--baseline", str(baseline_path), "--update-baseline"]
+    )
+
+    assert code == 0
+    assert baseline_path.is_file()
+    assert "baseline updated: 1 finding(s) written" in capsys.readouterr().out
+
+
+def test_baseline_gates_only_on_new_findings(tmp_path, capsys):
+    (tmp_path / "server.py").write_text("auto_approve = True\n")
+    baseline_path = tmp_path / "baseline.json"
+
+    assert main(
+        [str(tmp_path), "--baseline", str(baseline_path), "--update-baseline"]
+    ) == 0
+
+    # Rerunning against the unchanged repo: nothing new, exit 0.
+    assert main([str(tmp_path), "--baseline", str(baseline_path)]) == 0
+    capsys.readouterr()  # discard output from the two runs above
+
+    # A second, different violation appears: exactly one new finding, exit 1.
+    (tmp_path / "server.py").write_text(
+        "auto_approve = True\nskip_confirmation = True\n"
+    )
+    code = main([str(tmp_path), "--baseline", str(baseline_path), "--json"])
+    out = json.loads(capsys.readouterr().out)
+
+    assert code == 1
+    assert out["baseline_applied"] is True
+    assert len(out["baseline_new"]) == 1
+    assert "skip_confirmation" in out["baseline_new"][0]["message"]
+
+
+def test_baseline_never_suppresses_a_critical_finding(tmp_path):
+    (tmp_path / "server.py").write_text(
+        "import shutil\ndef wipe(path):\n    shutil.rmtree(path)\n"
+    )
+    baseline_path = tmp_path / "baseline.json"
+
+    # Baseline the critical finding away, in spirit -- write_baseline drops
+    # critical findings unconditionally, so this baseline is really empty.
+    main([str(tmp_path), "--baseline", str(baseline_path), "--update-baseline"])
+
+    code = main([str(tmp_path), "--baseline", str(baseline_path)])
+
+    assert code == 1  # FAIL_CRITICAL, unaffected by the baseline
+
+
+def test_missing_baseline_file_is_treated_as_empty_with_a_warning(tmp_path, capsys):
+    (tmp_path / "server.py").write_text("auto_approve = True\n")
+
+    code = main(
+        [str(tmp_path), "--baseline", str(tmp_path / "does-not-exist.json")]
+    )
+
+    assert code == 1  # everything is "new" against an empty baseline
+    assert "does not exist yet" in capsys.readouterr().err
+
+
+def test_malformed_baseline_file_returns_two(tmp_path, capsys):
+    (tmp_path / "server.py").write_text("x = 1\n")
+    baseline_path = tmp_path / "baseline.json"
+    baseline_path.write_text("{not json")
+
+    code = main([str(tmp_path), "--baseline", str(baseline_path)])
+
+    assert code == 2
+    assert "baseline" in capsys.readouterr().err.lower()
+
+
+def test_baseline_hides_pre_existing_findings_from_human_output(tmp_path, capsys):
+    (tmp_path / "server.py").write_text("auto_approve = True\n")
+    baseline_path = tmp_path / "baseline.json"
+    main([str(tmp_path), "--baseline", str(baseline_path), "--update-baseline"])
+    capsys.readouterr()
+
+    code = main([str(tmp_path), "--baseline", str(baseline_path)])
+    out = capsys.readouterr().out
+
+    assert code == 0
+    assert "Findings" not in out  # nothing new to list
+    assert "hidden by baseline" in out

@@ -555,6 +555,95 @@ To audit suppressions across a repo, grep for the marker: it is a plain
 comment on purpose, so `git log -S'agentgauge: ignore'` works and code
 review sees it in the diff.
 
+### Baseline mode
+
+`--baseline PATH` lets an existing repo adopt agentgauge without fixing
+every finding on day one: only findings *not already recorded* in the
+baseline file gate the exit code. `--update-baseline` (used together with
+`--baseline PATH`) writes the current non-critical findings to that file
+instead of gating on them.
+
+```console
+$ agentgauge . --baseline .agentgauge-baseline.json --update-baseline  # accept today's state
+$ agentgauge . --baseline .agentgauge-baseline.json                    # CI: fail only on regressions
+```
+
+**The score and verdict are never affected by a baseline.** This is
+deliberate, not an oversight: if baselining raised the score, adopting
+agentgauge on a messy legacy repo would make it look instantly
+well-governed — the exact "vacuous pass" failure mode the rest of this
+document spends a great deal of text preventing. A baseline is a *second,
+additional* CI gate layered on top of the score/verdict ("did anything get
+worse"), never a replacement for either.
+
+**A baseline cannot buy back `FAIL_CRITICAL`, structurally.** Critical
+findings are never written into a baseline file in the first place —
+`--update-baseline` drops them unconditionally, even if a critical finding
+was present in the scan that produced the file. So even a hand-edited
+baseline claiming to contain a critical finding has no effect: on the next
+scan, that finding is always treated as new, and `FAIL_CRITICAL` (and
+`--min-score`, if set) are checked exactly as if no baseline were given at
+all, before the baseline's own gate is even considered.
+
+**Identity is by count, not by instance.** Neither a finding's full
+identity (file, rule, line, message) nor a line-free one (file, rule,
+message) is a safe baseline key on its own:
+
+- Keying on the line number breaks the common case — any unrelated edit
+  above a finding shifts every subsequent line number, which would mark
+  each of them "new" on every single scan even though nothing about them
+  changed.
+- Dropping the line number isn't safe either: some rules produce
+  byte-identical messages for multiple sites in the same file (the
+  unconditional-loop finding in rule 4 is a bare string literal with no
+  interpolation at all), so two such findings in one file would collapse to
+  one key and become indistinguishable.
+
+The baseline file instead stores *how many* findings existed for each
+`(file, rule, message)` key, not which specific instance. A scan's
+findings for a key are matched against the stored count, in the same
+deterministic order the report already sorts them in; anything beyond that
+count is "new". This means an edit that shifts lines but changes nothing
+else still matches (same key, same count) — solving line drift for the
+common case — while a genuinely new instance of a recurring message (a
+third unguarded loop added to a file that already had two baselined ones)
+is still caught. The cost is a documented, deliberate imprecision: among
+several identical-looking findings, *which* one is "new" is an arbitrary
+but stable tie-break, not a claim about which was literally added most
+recently.
+
+**File format** (`agentgauge/baseline.py`), meant to be reviewed in a pull
+request the way a lockfile is — sorted by `(file, rule, message)` for a
+stable diff:
+
+```json
+{
+  "version": 1,
+  "findings": [
+    {"file": "server.py", "rule": "audit-logging", "message": "...", "count": 2}
+  ]
+}
+```
+
+A missing baseline file is not an error — first-run friendly, and `--baseline
+PATH` against a file that does not exist yet behaves as an empty baseline
+(everything reads as "new") with a warning, not a failure. A *present but
+malformed* file (bad JSON, wrong schema, an entry missing a field) is an
+error (exit `2`) — the same "a governance gate must never silently differ
+from what the author believes" reasoning `[tool.agentgauge]` validation
+already applies.
+
+`config_files_scanned` and JSON config-file findings (see rule 6) baseline
+identically to Python findings — a baseline key doesn't care which scanner
+produced the finding, only its `(file, rule, message)`.
+
+Deliberately **not** surfaced in `--sarif`: GitHub/GitLab code scanning
+already tracks new-versus-existing findings itself across SARIF runs, so a
+parallel "new" concept there would be redundant. `--json` carries
+`baseline_applied` and `baseline_new` (the findings a baseline run judged
+new); both are always present, empty/`false` when `--baseline` wasn't
+used.
+
 ### Output formats
 
 `--json` emits agentgauge's own report shape. Its top-level and per-finding

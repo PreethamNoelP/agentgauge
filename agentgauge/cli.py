@@ -1,14 +1,19 @@
 """Command-line interface: `agentgauge <path> [--json|--sarif] [--min-score N]`.
 
 Exit codes are the contract for CI:
-  0  scan completed, met --min-score (if given), and no critical failures
+  0  scan completed, met --min-score (if given), no critical failures, and
+     (if --baseline was given) nothing new since the baseline
   1  score below --min-score, OR the verdict is FAIL_CRITICAL -- a single
      ungated critical action (payment, file delete, shell exec, ...) fails
      the build regardless of --min-score or how high the aggregate score is
-     -- OR the verdict is INCOMPLETE and --fail-on-incomplete was passed
+     -- OR the verdict is INCOMPLETE and --fail-on-incomplete was passed --
+     OR --baseline was given and a finding not already in it appeared (a
+     baseline never suppresses the two checks above it in this list: it is
+     an additional gate, not a replacement for either)
   2  bad invocation (target missing, no Python or MCP config files actually
-     scanned, or an explicit/discovered [tool.agentgauge] config file is
-     malformed)
+     scanned, an explicit/discovered [tool.agentgauge] config file is
+     malformed, --update-baseline was passed without --baseline, or
+     --baseline names a file that exists but isn't a valid baseline)
 """
 
 import argparse
@@ -18,6 +23,12 @@ import sys
 from pathlib import Path
 
 from agentgauge import __version__
+from agentgauge.baseline import (
+    BaselineError,
+    diff_against_baseline,
+    load_baseline,
+    write_baseline,
+)
 from agentgauge.config import ConfigError, load_config
 from agentgauge.sarif import build_sarif
 from agentgauge.scanner import scan
@@ -65,7 +76,12 @@ def _safe(text: str) -> str:
     return str(text).translate(_ESCAPES)
 
 
-def _print_report(report: ScanReport, target: str, config_source: str | None) -> None:
+def _print_report(
+    report: ScanReport,
+    target: str,
+    config_source: str | None,
+    baseline_written: int | None = None,
+) -> None:
     print(f"agentgauge: {_safe(target)}")
     print(f"scanned {report.files_scanned} Python file(s)", end="")
     if report.config_files_scanned:
@@ -99,12 +115,28 @@ def _print_report(report: ScanReport, target: str, config_source: str | None) ->
             "still counted toward FAIL_CRITICAL; suppression cannot buy back the verdict)"
         )
 
-    if report.findings:
-        print(f"\nFindings ({len(report.findings)}):")
-        for f in report.findings:
+    if baseline_written is not None:
+        print(f"  (baseline updated: {baseline_written} finding(s) written)")
+
+    # Baseline mode changes which findings are *listed*, never the score or
+    # verdict above -- those always reflect the whole scan. Listing only the
+    # new ones is the entire point of adopting a baseline on a legacy repo:
+    # decluttering a backlog no one is fixing today without hiding it from
+    # the score that already accounts for it.
+    shown = report.baseline_new if report.baseline_applied else report.findings
+    if shown:
+        print(f"\nFindings ({len(shown)}):")
+        for f in shown:
             print(f"\n  {_safe(f.file)}:{f.line}  [{f.rule}]")
             print(f"    {_safe(f.message)}")
             print(f"    fix: {_safe(f.fix)}")
+    if report.baseline_applied and len(report.findings) > len(shown):
+        hidden = len(report.findings) - len(shown)
+        print(
+            f"\n({hidden} pre-existing finding(s) hidden by baseline -- "
+            "see --update-baseline to accept the current state, or omit "
+            "--baseline to see everything)"
+        )
 
     _print_warnings(report)
 
@@ -158,11 +190,31 @@ def _build_parser() -> argparse.ArgumentParser:
         help="path to a TOML file with a [tool.agentgauge] table; "
              "default is to look for pyproject.toml next to the target",
     )
+    parser.add_argument(
+        "--baseline",
+        type=Path,
+        default=None,
+        metavar="PATH",
+        help="only exit non-zero for findings not already recorded in this "
+             "baseline file -- for adopting agentgauge on an existing repo "
+             "without fixing every finding on day one. Never suppresses a "
+             "critical finding: --min-score and the FAIL_CRITICAL verdict "
+             "still apply exactly as without a baseline",
+    )
+    parser.add_argument(
+        "--update-baseline",
+        action="store_true",
+        help="write the current non-critical findings to --baseline instead "
+             "of gating on it; requires --baseline PATH",
+    )
     return parser
 
 
 def _emit(
-    report: ScanReport, args: argparse.Namespace, config_source: str | None
+    report: ScanReport,
+    args: argparse.Namespace,
+    config_source: str | None,
+    baseline_written: int | None = None,
 ) -> None:
     """Write the report in the requested format.
 
@@ -179,7 +231,7 @@ def _emit(
         elif args.sarif:
             print(json.dumps(build_sarif(report, config_source), indent=2))
         else:
-            _print_report(report, args.target, config_source)
+            _print_report(report, args.target, config_source, baseline_written)
             return
         _print_warnings(report)
     except BrokenPipeError:
@@ -192,7 +244,11 @@ def _emit(
 
 
 def main(argv: list[str] | None = None) -> int:
-    args = _build_parser().parse_args(argv)
+    parser = _build_parser()
+    args = parser.parse_args(argv)
+
+    if args.update_baseline and args.baseline is None:
+        parser.error("--update-baseline requires --baseline PATH")
 
     target = Path(args.target)
     if not target.exists():
@@ -225,7 +281,30 @@ def main(argv: list[str] | None = None) -> int:
         )
         return 2
 
-    _emit(report, args, config.source)
+    baseline_written = None
+    if args.baseline is not None:
+        if args.update_baseline:
+            # scan()/score_contexts() know nothing of --baseline, so this is
+            # set here rather than inside scan() -- baseline is a CLI-level
+            # adoption convenience layered on top of the score/verdict, not
+            # a thing that changes them (see baseline.py's module docstring).
+            baseline_written = write_baseline(args.baseline, report.findings)
+        else:
+            if not args.baseline.is_file():
+                report.warnings.append(
+                    f"--baseline {args.baseline} does not exist yet -- "
+                    "treating it as empty; every finding below is 'new' "
+                    "until you run with --update-baseline"
+                )
+            try:
+                baseline = load_baseline(args.baseline)
+            except BaselineError as exc:
+                print(f"agentgauge: {exc}", file=sys.stderr)
+                return 2
+            report.baseline_applied = True
+            report.baseline_new = diff_against_baseline(report.findings, baseline)
+
+    _emit(report, args, config.source, baseline_written)
 
     min_score = args.min_score if args.min_score is not None else config.min_score
 
@@ -234,6 +313,11 @@ def main(argv: list[str] | None = None) -> int:
     if min_score is not None and report.score < min_score:
         return 1
     if args.fail_on_incomplete and report.verdict == "INCOMPLETE":
+        return 1
+    # A baseline never suppresses FAIL_CRITICAL or --min-score above -- both
+    # already returned by this point if triggered. This is the baseline's
+    # own, additional gate: something not already accounted for appeared.
+    if report.baseline_applied and report.baseline_new:
         return 1
     return 0
 

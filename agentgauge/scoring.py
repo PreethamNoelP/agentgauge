@@ -62,6 +62,15 @@ class ScanReport:
     warnings: list[str] = field(default_factory=list)
     # Critical-gate-bearing rules that config turned off for this scan.
     gate_disabled: tuple[str, ...] = ()
+    # Baseline mode (agentgauge/baseline.py), set by cli.py after scan()
+    # returns -- scan()/score_contexts() know nothing about --baseline,
+    # deliberately: baseline is a CLI-level adoption convenience layered on
+    # top of the score/verdict, never a way to change either of them (see
+    # baseline.py's module docstring). Always present so the JSON/SARIF
+    # shape is consistent whether or not --baseline was passed, matching
+    # `skipped`/`warnings`'s own "empty list when unused" convention.
+    baseline_applied: bool = False
+    baseline_new: list[Finding] = field(default_factory=list)
 
     @property
     def score(self) -> float:
@@ -171,6 +180,8 @@ class ScanReport:
             "suppressed": self.suppressed,
             "critical_suppressed": self.critical_suppressed,
             "warnings": self.warnings,
+            "baseline_applied": self.baseline_applied,
+            "baseline_new": [asdict(f) for f in self.baseline_new],
         }
 
 

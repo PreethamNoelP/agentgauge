@@ -199,6 +199,8 @@ def test_json_report_top_level_keys_are_stable():
         "suppressed",
         "critical_suppressed",
         "warnings",
+        "baseline_applied",
+        "baseline_new",
     }
 
 

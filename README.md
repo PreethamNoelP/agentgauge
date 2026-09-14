@@ -131,6 +131,7 @@ flowchart LR
     CFG[config.py<br/>tool.agentgauge loader] --> SC
     CLI[cli.py<br/>argparse, output, exit codes] --> SC[scanner.py<br/>file walk + encoding-safe parse]
     CLI --> CFG
+    CLI --> BL[baseline.py<br/>--baseline / --update-baseline]
     SC -->|AST per file| CTX[FileContext<br/>cached views, alias map,<br/>sink tables, config, suppressions]
     SC -->|JSON config files| JCS[configscan.py<br/>claude_desktop_config.json, mcp.json, ...]
     CTX --> R1[rules/oversight]
@@ -142,6 +143,7 @@ flowchart LR
     R1 & R2 & R3 & R4 & R5 & R6 --> AG[scoring.py<br/>cross-file aggregation + suppression]
     JCS -->|merged into rule 6's category| AG
     AG --> REP[ScanReport]
+    REP --> BL
     REP --> OUT1[human / JSON render]
     REP --> OUT2[sarif.py<br/>SARIF 2.1.0 render]
 ```
@@ -151,6 +153,7 @@ Design decisions that matter:
 - **Each rule is a plug-in** exposing `RULE_ID`, `CATEGORY`, `WEIGHT`, and `check(ctx) → (sites, passed, findings)`. Adding a seventh category means adding one file and registering it. See [CONTRIBUTING.md](CONTRIBUTING.md) for the invariants scoring relies on.
 - **Shared AST plumbing lives in one place** ([astutils.py](agentgauge/astutils.py)): the sink vocabulary, alias resolution, scope walking, suppression parsing, and the cached per-file views (`functions`, `sensitive_calls`, `tool_functions`, `parents`) that keep six rules from re-walking the same trees. **Shared file-walk plumbing** ([fswalk.py](agentgauge/fswalk.py)) does the same for the parts of "which files does a scan look at" that don't care whether a file is Python or JSON, so [configscan.py](agentgauge/configscan.py) (the JSON config-file scanner) and `scanner.py` share one implementation instead of two.
 - **JSON config-file findings are not a seventh rule.** [configscan.py](agentgauge/configscan.py) asks the exact same question as `rules/defaults.py` — is a recognized flag set to its dangerous value — sourced from `claude_desktop_config.json`/`mcp.json`/etc. instead of Python AST, and merges its (sites, passed, findings) into that same category. The 100-point weight model is untouched.
+- **Baseline is layered on top of scoring, not inside it.** [baseline.py](agentgauge/baseline.py) never sees a `FileContext` or a rule — it only ever sees the finished `ScanReport.findings`, from `cli.py`, after scoring is done. This is what keeps a baseline from ever being able to change the score or verdict themselves (see RULES.md's "Baseline mode").
 - **Scoring semantics live in the models**, not the rules — rules report facts; [models.py](agentgauge/models.py) turns facts into numbers. Suppression, disabled rules, and scan warnings live in [scoring.py](agentgauge/scoring.py) as scan-wide concerns.
 - **Output rendering is decoupled from scoring** — [sarif.py](agentgauge/sarif.py) renders a `ScanReport` without `scoring.py` knowing SARIF exists.
 
@@ -225,6 +228,8 @@ $ agentgauge . --sarif                     # SARIF 2.1.0, for code-scanning dash
 $ agentgauge . --min-score 70              # CI gate: exit 1 below 70
 $ agentgauge . --fail-on-incomplete        # CI gate: exit 1 if coverage was reduced
 $ agentgauge . --config custom.toml        # explicit config instead of discovery
+$ agentgauge . --baseline base.json --update-baseline  # accept today's findings
+$ agentgauge . --baseline base.json        # CI: fail only on new findings since then
 ```
 
 (`python -m agentgauge` works identically if you prefer module invocation.)
@@ -356,12 +361,13 @@ Real problems this project had to solve — documented with their remaining limi
 - [x] **SARIF output** — `--sarif` with a full invocation record for code-scanning ingestion
 - [x] **GitHub Action and pre-commit hook** — `uses: PreethamNoelP/agentgauge@v0.1.0`, or a `.pre-commit-config.yaml` entry
 - [x] **Config-file scanning** — catch permissive defaults living in `claude_desktop_config.json`, `mcp.json`, `.mcp.json`, `cline_mcp_settings.json`, `mcp_settings.json`, or any filename added via `extra_config_filenames`; merged into the same "Permissive defaults" category, not a new one
+- [x] **Baseline file** — `--baseline PATH` (+ `--update-baseline` to accept the current state) so an existing repo can adopt agentgauge without fixing every finding on day one. Resolved the way RULES.md said it had to be: critical findings are never written into a baseline file, so `FAIL_CRITICAL` can't be bought back by one
 - [ ] **Publish to PyPI** — plain `pip install agentgauge`, no git URL needed
-- [ ] **Baseline file** — `--baseline` so an existing repo can adopt agentgauge without fixing every finding on day one. Needs a decision first: a baseline that can silence a *critical* finding would be the one thing this tool promises cannot happen, and one that cannot is useless to exactly the repos that need it most
 - [ ] **Pydantic/FastMCP schema awareness** — validate declared input models, not just parameters (the largest remaining rule-5 blind spot)
 - [ ] **Cross-module resolution** — a sink gated by a helper in another file is currently a false failure
 - [ ] **Plugin/entry-point rule system** — third-party rules without forking source
 - [ ] **New OWASP categories** — secrets/credential exposure, SSRF, excessive tool scope (would rebalance the 100-point weight model)
+- [ ] **TypeScript/JavaScript support** — a lightweight heuristic scanner (not a full parser, to keep the zero-dependency, no-code-execution guarantees) for the large share of MCP servers written in TS/JS; scoped as a separate effort given the accuracy gap against the Python AST rules
 
 ## 🤝 Contributing
 

@@ -23,6 +23,26 @@ explicitly.
 
 ### Added
 
+- **Baseline mode.** `--baseline PATH` gates the exit code only on findings
+  not already recorded in that file, and `--update-baseline` writes the
+  current non-critical findings to it — the roadmap item this file already
+  flagged as needing a decision first ("a baseline that can silence a
+  critical finding would be the one thing this tool promises cannot
+  happen"). Resolved structurally: `--update-baseline` drops every critical
+  finding unconditionally, so even a hand-edited baseline claiming to
+  contain one has no effect, and `FAIL_CRITICAL`/`--min-score` are checked
+  exactly as without a baseline before the baseline's own gate applies.
+  Identity is by count per `(file, rule, message)`, not by line or full
+  identity — a plain line-based key would falsely flag every finding below
+  an unrelated edit as "new" on every scan; a plain `(file, rule, message)`
+  key would collide for rules whose message carries no per-site detail
+  (rule 4's unconditional-loop finding is a static string). See RULES.md's
+  "Baseline mode" section for the full algorithm and its documented
+  imprecision. The score and verdict are **never** affected by a baseline —
+  only the exit code and which findings are printed. New JSON fields:
+  `baseline_applied`, `baseline_new`; deliberately not added to `--sarif`
+  (redundant with code-scanning's own new-vs-existing tracking).
+
 - **JSON config-file scanning.** Every scan now also checks known MCP
   client config filenames (`claude_desktop_config.json`, `mcp.json`,
   `.mcp.json`, `cline_mcp_settings.json`, `mcp_settings.json`, extendable
