@@ -10,6 +10,28 @@ explicitly.
 
 ## [Unreleased]
 
+### Removed
+
+- The vendored in-browser playground (`docs/`, including the hand-synced
+  `docs/vendor/` copy of the package and `tests/test_playground_assets.py`,
+  the test that kept the copy honest). It was never published — `docs/`
+  had no GitHub Pages workflow, and `docs/README.md` said so itself — and a
+  manually-`cp`'d second copy of six modules is exactly the kind of drift
+  risk this project's own `RULES.md` would flag in someone else's repo.
+  `[tool.agentgauge] exclude` and `[tool.ruff] extend-exclude` both drop
+  their `docs/vendor` entries accordingly.
+
+### Changed
+
+- README examples for the GitHub Action and pre-commit hook now show the
+  recommended verdict-only gate (no `min-score`) as the primary form, with
+  `min-score` as a clearly-labeled optional stricter floor. The previous
+  examples set `min-score: "70"` by default, which contradicted both
+  `action.yml`'s own description ("Left empty, only the verdict gates the
+  build — which is the recommended setup") and this file's own "What makes
+  it different" section ("the verdict, not the score, is what belongs in a
+  CI gate").
+
 ### Fixed — the verdict (this changes CI outcomes)
 
 - **A scan with zero applicable sites reported `PASS`.** Every category

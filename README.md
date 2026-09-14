@@ -4,7 +4,7 @@
 
 **A zero-dependency static governance scanner for MCP servers and AI agent code — a linter for the OWASP Agentic Top 10.**
 
-*Point it at any Python repo. Get a 0–100 governance score, specific findings, and concrete fixes — without executing a single line of the scanned code.*
+*Point it at any Python repo. Get a PASS / FAIL_CRITICAL verdict, specific findings, and concrete fixes — plus a 0–100 trend score for tracking governance posture over time — without executing a single line of the scanned code.*
 
 [![CI](https://github.com/PreethamNoelP/agentgauge/actions/workflows/ci.yml/badge.svg)](https://github.com/PreethamNoelP/agentgauge/actions/workflows/ci.yml)
 ![Python](https://img.shields.io/badge/python-3.11%20%7C%203.12%20%7C%203.13-blue)
@@ -82,8 +82,8 @@ What makes it different:
 - 🚫 **Zero dependencies** — pure Python 3.11+ standard library (config parsing uses stdlib `tomllib`); `pytest` needed only for the test suite
 - 🔒 **Never executes scanned code** — `ast.parse` and `tokenize` only, safe to run on untrusted or hostile repos
 - 🎯 **Actionable findings** — every finding ships with a concrete, copy-adaptable fix
-- 🧮 **Weighted 0–100 score** — one number a team can put a threshold on
-- 🤖 **CI-native** — `--min-score 70` fails the build; exit `2` guards against the "scanned zero files, passed anyway" trap; `--fail-on-incomplete` guards against the quieter "scanned *most* files, passed anyway" one
+- 🧮 **Weighted 0–100 score** — a trend line for tracking governance posture over time, not a CI gate (see below: the `verdict` is what belongs in a threshold)
+- 🤖 **CI-native** — the `verdict` gates the build by default; `--min-score N` is available as an optional stricter floor; exit `2` guards against the "scanned zero files, passed anyway" trap; `--fail-on-incomplete` guards against the quieter "scanned *most* files, passed anyway" one
 - 📦 **JSON or SARIF 2.1.0** — pipe reports into dashboards, bots, PR comments, or GitHub/GitLab code scanning
 - ⚙️ **Configurable, never overridable** — `[tool.agentgauge]` in pyproject.toml adds project vocabulary, excludes, and disables categories; it can never make a rule stop recognizing its built-in defaults, and a config that would neuter a rule is rejected rather than honored
 - 🙈 **Inline suppression** — `# agentgauge: ignore[rule-id]` for incremental adoption, without ever weakening `FAIL_CRITICAL`
@@ -260,7 +260,19 @@ malformed marker suppresses nothing rather than everything. See
 
 ### GitHub Actions
 
-agentgauge ships as an action, so the gate is one step:
+agentgauge ships as an action, so the gate is one step. This is the
+recommended setup: leave `min-score` empty and let the `verdict` alone gate
+the build — a `FAIL_CRITICAL` fails regardless, and the score can't be
+diluted into a false green:
+
+```yaml
+- uses: PreethamNoelP/agentgauge@v0.1.0
+  with:
+    path: .
+    fail-on-incomplete: "true"
+```
+
+A team that also wants a stricter score floor can add `min-score`:
 
 ```yaml
 - uses: PreethamNoelP/agentgauge@v0.1.0
@@ -294,8 +306,11 @@ repos:
     rev: v0.1.0
     hooks:
       - id: agentgauge
-        args: [--min-score, "70", --fail-on-incomplete]
+        args: [--fail-on-incomplete]
 ```
+
+(Add `--min-score N` to the `args` list for a stricter score floor on top
+of the verdict gate.)
 
 The hook scans the whole repository rather than the staged files, and that
 is deliberate: a category's score is `passed / applicable sites` across the
