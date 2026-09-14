@@ -6,8 +6,9 @@ Exit codes are the contract for CI:
      ungated critical action (payment, file delete, shell exec, ...) fails
      the build regardless of --min-score or how high the aggregate score is
      -- OR the verdict is INCOMPLETE and --fail-on-incomplete was passed
-  2  bad invocation (target missing, no Python files actually scanned, or
-     an explicit/discovered [tool.agentgauge] config file is malformed)
+  2  bad invocation (target missing, no Python or MCP config files actually
+     scanned, or an explicit/discovered [tool.agentgauge] config file is
+     malformed)
 """
 
 import argparse
@@ -67,6 +68,8 @@ def _safe(text: str) -> str:
 def _print_report(report: ScanReport, target: str, config_source: str | None) -> None:
     print(f"agentgauge: {_safe(target)}")
     print(f"scanned {report.files_scanned} Python file(s)", end="")
+    if report.config_files_scanned:
+        print(f" and {report.config_files_scanned} MCP config file(s)", end="")
     print(f" (config: {_safe(config_source)})\n" if config_source else "\n")
 
     for c in report.categories:
@@ -206,14 +209,18 @@ def main(argv: list[str] | None = None) -> int:
 
     report = scan(target, config=config)
 
-    if report.files_scanned == 0:
+    if report.files_scanned == 0 and report.config_files_scanned == 0:
         # A score over zero evidence is vacuous, and a vacuous score must
         # not look like a passing one. Covers empty repos, non-Python repos,
-        # and directories where every file failed to parse.
+        # and directories where every file failed to parse. Checked against
+        # both counters: a directory holding only a recognized MCP config
+        # file (no .py files at all) is real evidence, not zero evidence,
+        # even though files_scanned alone would read as zero.
         _print_warnings(report)
         print(
-            f"agentgauge: no Python files scanned under {_safe(args.target)} -- "
-            "refusing to report a score based on zero evidence",
+            f"agentgauge: no Python or MCP config files scanned under "
+            f"{_safe(args.target)} -- refusing to report a score based on "
+            "zero evidence",
             file=sys.stderr,
         )
         return 2

@@ -479,3 +479,61 @@ def test_exclude_hiding_every_sink_cannot_produce_a_pass(tmp_path):
     assert filtered.total_sites == 0
     assert filtered.verdict == "INCOMPLETE"  # the conclusion is not
     assert filtered.excluded == 1
+
+
+# --- JSON config-file scanning (configscan.py) ---
+
+
+def test_scan_finds_permissive_default_in_known_config_file(tmp_path):
+    (tmp_path / "claude_desktop_config.json").write_text(
+        '{"mcpServers": {"shell": {"autoApprove": true}}}\n'
+    )
+
+    report = scan(tmp_path)
+
+    assert report.config_files_scanned == 1
+    assert any(
+        f.file == "claude_desktop_config.json" and f.rule == "permissive-defaults"
+        for f in report.findings
+    )
+
+
+def test_scan_merges_config_file_sites_into_permissive_defaults_category(tmp_path):
+    (tmp_path / "server.py").write_text("auto_approve = True\n")
+    (tmp_path / "mcp.json").write_text('{"autoApprove": true}\n')
+
+    report = scan(tmp_path)
+
+    defaults_cat = next(
+        c for c in report.categories if c.name == "Permissive defaults"
+    )
+    assert defaults_cat.sites == 2  # one from the .py file, one from the JSON
+    assert len(report.categories) == 6  # not a new, seventh category
+
+
+def test_scan_skips_config_scanning_when_the_rule_is_disabled(tmp_path):
+    (tmp_path / "mcp.json").write_text('{"autoApprove": true}\n')
+
+    config = Config(rules=RuleConfig(disabled_rules=frozenset({"permissive-defaults"})))
+    report = scan(tmp_path, config=config)
+
+    assert report.config_files_scanned == 0
+    assert not any(f.rule == "permissive-defaults" for f in report.findings)
+
+
+def test_scan_reports_malformed_json_config_as_skipped(tmp_path):
+    (tmp_path / "mcp.json").write_text("{not valid json")
+
+    report = scan(tmp_path)
+
+    assert any("invalid JSON" in entry for entry in report.skipped)
+    assert report.verdict == "INCOMPLETE"
+
+
+def test_scan_config_file_exclude_pattern_is_honored(tmp_path):
+    (tmp_path / "mcp.json").write_text('{"autoApprove": true}\n')
+
+    report = scan(tmp_path, config=Config(exclude=("mcp.json",)))
+
+    assert report.config_files_scanned == 0
+    assert report.excluded == 1

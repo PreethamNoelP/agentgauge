@@ -38,8 +38,20 @@ DANGEROUS_WHEN_FALSE = frozenset({
 })
 
 
-def _collapsed(name: str) -> str:
+def collapse_flag_name(name: str) -> str:
+    """Normalize a flag name for vocabulary matching: lowercase, with
+    underscores and hyphens stripped, so auto_approve/AUTO_APPROVE/
+    autoApprove/auto-approve all collapse to the same "autoapprove".
+
+    Public (not just this module's own concern): agentgauge/configscan.py
+    reuses it so a flag is judged identically whether it lives in Python
+    source or a JSON MCP config file."""
     return name.lower().replace("_", "").replace("-", "")
+
+
+# Old name kept as an alias at existing call sites in this module -- purely
+# cosmetic, no behavior change.
+_collapsed = collapse_flag_name
 
 
 def _flag_bindings(tree: ast.AST) -> Iterator[tuple[str, ast.expr, int]]:

@@ -8,81 +8,22 @@ contributes nothing to the score, in either direction, and makes the
 verdict INCOMPLETE so a partial view never looks like a full pass.
 """
 
-import fnmatch
 import os
 import tokenize
 from pathlib import Path
 from typing import Callable, Iterator
 
+from agentgauge import configscan
 from agentgauge.astutils import FileContext
 from agentgauge.config import Config
+from agentgauge.fswalk import MAX_FILE_BYTES, SKIP_DIRS, is_excluded
+from agentgauge.rules import defaults
 from agentgauge.scoring import ScanReport, score_contexts
 
-# Directories whose contents are never the user's own tool code. Scanning
-# your own .venv is the classic way to drown a report in library noise.
-# Matched against the path *relative to the scan root* only: matching
-# absolute path components instead meant a repo that happened to live in
-# ~/dev/build/ or C:\...\dist\ had every one of its files skipped.
-SKIP_DIRS = {
-    ".git", ".hg", ".svn",
-    "__pycache__", ".mypy_cache", ".pytest_cache", ".tox", ".eggs",
-    ".venv", "venv", "env", "node_modules", "site-packages",
-    "build", "dist",
-}
-
-# Guard against a single pathological file exhausting CI memory: ast.parse
-# builds a tree many times the size of its source, so a hostile
-# multi-hundred-megabyte "module" is a cheap way to OOM a scanner that runs
-# on untrusted repositories. No hand-written module comes close to this;
-# anything over it is skipped visibly (INCOMPLETE), never silently.
-MAX_FILE_BYTES = 5_000_000
-
-
-def _match_variants(pattern: str) -> list[str]:
-    """Spellings of an exclude pattern that should behave identically.
-
-    A trailing slash is decoration ("vendor/" == "vendor"), and a leading
-    "**/" is how people write "at any depth" -- but fnmatch reads it as
-    "some characters, then a literal slash", so "**/generated_*.py" would
-    match nothing at the repo root. Both spellings are normalized here
-    rather than by translating patterns into regexes by hand.
-    """
-    pattern = pattern.rstrip("/") or pattern
-    variants = [pattern]
-    if pattern.startswith("**/"):
-        variants.append(pattern[3:])
-    return variants
-
-
-def _is_excluded(rel_posix: str, patterns: tuple[str, ...]) -> bool:
-    """Match an exclude pattern against the scan-relative posix path with
-    gitignore-shaped semantics, using only fnmatch:
-
-      - "tests/fixtures/*"  -- path match, as before
-      - "**/generated_*.py" -- also matches at the root
-      - "vendor" / "vendor/" -- the directory and everything under it
-      - "*.gen.py"          -- a slash-free pattern matches the basename
-                               at any depth
-
-    fnmatchcase, not fnmatch: plain fnmatch normalizes case through
-    os.path.normcase, which would make excludes case-insensitive on Windows
-    and case-sensitive on Linux -- the same config producing different
-    scans per platform.
-    """
-    parts = rel_posix.split("/")
-    # The file itself, then each of its parent directories.
-    candidates = [rel_posix] + ["/".join(parts[:i]) for i in range(1, len(parts))]
-    for pattern in patterns:
-        for variant in _match_variants(pattern):
-            basename_only = "/" not in variant
-            for candidate in candidates:
-                if fnmatch.fnmatchcase(candidate, variant):
-                    return True
-                if basename_only and fnmatch.fnmatchcase(
-                    candidate.rsplit("/", 1)[-1], variant
-                ):
-                    return True
-    return False
+__all__ = [
+    "MAX_FILE_BYTES", "SKIP_DIRS", "is_excluded",
+    "iter_python_files", "escapes_scan_root", "scan",
+]
 
 
 def iter_python_files(
@@ -108,7 +49,7 @@ def iter_python_files(
         rel = path.relative_to(root)
         if any(part in SKIP_DIRS for part in rel.parts):
             continue
-        if exclude and _is_excluded(rel.as_posix(), exclude):
+        if exclude and is_excluded(rel.as_posix(), exclude):
             if on_excluded is not None:
                 on_excluded(path)
             continue
@@ -250,12 +191,48 @@ def scan(target: str | Path, config: Config | None = None) -> ScanReport:
 
     report = score_contexts(iter_contexts(), disabled_rules=config.rules.disabled_rules)
     report.skipped = skipped
-    # Assigned after score_contexts has drained the generator, so the count
-    # is final. Unlike `skipped` this does not make the verdict INCOMPLETE:
-    # excluding files is a deliberate project decision, not a gap in
-    # coverage agentgauge hit by accident. It only has to be *visible* --
-    # and when an exclude pattern does hide everything that mattered, the
-    # resulting zero-site scan is INCOMPLETE on its own merits.
+
+    # JSON config-file scanning (claude_desktop_config.json, mcp.json, ...):
+    # the same governance question as the AST "Permissive defaults" rule,
+    # merged into the same CategoryResult rather than a category of its
+    # own -- see configscan.py's module docstring. Skipped entirely if that
+    # rule was disabled: there is then no category to merge into, and a
+    # disabled rule must mean "we didn't look", not "we looked and it's
+    # fine" (the same reasoning score_contexts already applies to the AST
+    # rule via CRITICAL_GATE_RULES/gate_disabled).
+    defaults_category = next(
+        (c for c in report.categories if c.name == defaults.CATEGORY), None
+    )
+    if defaults_category is not None:
+        config_files_scanned = 0
+        for path in configscan.iter_config_files(
+            root, config.extra_config_filenames, config.exclude, count_excluded
+        ):
+            rel = _display_path(path, root, cwd)
+            if not root.is_file() and escapes_scan_root(path, root):
+                skipped.append(
+                    f"{rel}: symlink not followed (target is outside the "
+                    "scan root, or could not be resolved)"
+                )
+                continue
+            sites, passed, findings, skip_reason = configscan.scan_config_file(
+                path, rel, config.rules
+            )
+            if skip_reason is not None:
+                skipped.append(f"{rel}: {_relativize(skip_reason, path, rel)}")
+                continue
+            config_files_scanned += 1
+            defaults_category.sites += sites
+            defaults_category.passed += passed
+            defaults_category.findings.extend(findings)
+        report.config_files_scanned = config_files_scanned
+
+    # Assigned after both walks have finished, so the count is final. Unlike
+    # `skipped` this does not make the verdict INCOMPLETE: excluding files
+    # is a deliberate project decision, not a gap in coverage agentgauge hit
+    # by accident. It only has to be *visible* -- and when an exclude
+    # pattern does hide everything that mattered, the resulting zero-site
+    # scan is INCOMPLETE on its own merits.
     report.excluded = excluded
     if excluded:
         report.warnings.append(

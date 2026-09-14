@@ -328,17 +328,45 @@ server usually spells its settings.
   internal helper that has nothing to do with TLS is still flagged, and
   `sandbox=False` in a payment SDK usually means "production", not
   "unsafe". Both are cheap to suppress inline; neither is critical.
-- **Blind spots:** **non-Python config** — JSON/YAML/`.env`, which is where
-  real deployments (e.g. `claude_desktop_config.json`) actually set these.
-  A string value is never a site either: `AUTO_APPROVE = "true"` and
+- **Blind spots:** `.env` and YAML config are still invisible, and a string
+  value is never a site: `AUTO_APPROVE = "true"` and
   `os.environ.get("AUTO_APPROVE", "true")` are both invisible.
 - **Configurable:** `extra_dangerous_when_true` /
   `extra_dangerous_when_false` add project-specific flag names
   (`yolo_mode = True` no longer has to be a blind spot once it's named in
   config) — normalized the same way as the built-in lists.
-- **Planned:** a config-file scanner scoped to known filenames — pure-data
-  formats are *more* statically tractable than Python, so error rates will
-  be lower than the AST rules.
+
+**JSON MCP config-file scanning** (`agentgauge/configscan.py`) closes the
+largest blind spot named above: real deployments set these flags in JSON,
+not Python. Every scan additionally checks known MCP client config
+filenames — `claude_desktop_config.json`, `mcp.json`, `.mcp.json`,
+`cline_mcp_settings.json`, `mcp_settings.json` — for a literal JSON boolean
+(`"key": true` or `"key": false`) bound to a recognized flag name, using
+the exact same vocabulary tables and name normalization as the AST rule
+above. A finding from a config file reports the same `permissive-defaults`
+rule id and is scored as part of the same category — this is not a seventh
+rule, and does not change the 100-point weight model.
+
+- **Catches:** `"autoApprove": true`, `"skip_confirmation": true`, etc.,
+  anywhere in a recognized config file, regardless of nesting.
+- **Not sites:** a quoted string (`"autoApprove": "true"`) — literal JSON
+  booleans only, the same "constant only, never guess at a string" rule the
+  AST rule already applies. An array is not a site either: some real MCP
+  clients spell per-tool auto-approval as a list of tool names
+  (`"autoApprove": ["run_command"]`), which this scanner does not attempt
+  to interpret.
+- **Blind spots:** filename-based recognition only — an MCP client using an
+  unlisted config filename is invisible until named via
+  `extra_config_filenames`. No path/nesting awareness: a flag anywhere in
+  the file counts toward the same score regardless of which server block
+  it lives under, so a repo with ten MCP servers and one permissive flag
+  among them is scored the same as it would be if you didn't know which
+  server was responsible.
+- **A malformed config file is `skipped`, not silently ignored** — same
+  treatment as an unparseable Python file: it shrinks coverage, and the
+  verdict becomes `INCOMPLETE`.
+- **Configurable:** `extra_config_filenames` in `[tool.agentgauge]` adds
+  recognized filenames beyond the built-in list, additively.
 
 ## Cross-rule interactions
 
@@ -359,8 +387,13 @@ server usually spells its settings.
 
 ## What agentgauge scans, and what it skips
 
-`.py` files under the target, in sorted order. Skipped, with a note in
-`report.skipped` (which makes the verdict `INCOMPLETE`):
+`.py` files under the target, in sorted order, plus known MCP client
+config filenames (`claude_desktop_config.json`, `mcp.json`, `.mcp.json`,
+`cline_mcp_settings.json`, `mcp_settings.json`, or anything added via
+`extra_config_filenames`) checked for permissive-default flags — see rule 6
+above. `config_files_scanned` in the report counts these separately from
+`files_scanned`. Skipped, with a note in `report.skipped` (which makes the
+verdict `INCOMPLETE`):
 
 - Directories named `.git`, `__pycache__`, `.venv`, `venv`, `env`,
   `node_modules`, `site-packages`, `build`, `dist`, and the usual caches —
@@ -410,6 +443,7 @@ extra_validation_tokens = ["scrub"]
 extra_risky_params = ["apikey", "secret"]
 extra_dangerous_when_true = ["yolo_mode"]
 extra_dangerous_when_false = ["least_privilege"]
+extra_config_filenames = ["my_client_mcp_config.json"]
 ```
 
 **Validation is strict, on purpose.** For a governance gate, settings that

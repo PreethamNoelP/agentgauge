@@ -85,6 +85,7 @@ What makes it different:
 - 🧮 **Weighted 0–100 score** — a trend line for tracking governance posture over time, not a CI gate (see below: the `verdict` is what belongs in a threshold)
 - 🤖 **CI-native** — the `verdict` gates the build by default; `--min-score N` is available as an optional stricter floor; exit `2` guards against the "scanned zero files, passed anyway" trap; `--fail-on-incomplete` guards against the quieter "scanned *most* files, passed anyway" one
 - 📦 **JSON or SARIF 2.1.0** — pipe reports into dashboards, bots, PR comments, or GitHub/GitLab code scanning
+- 🗂️ **MCP config-file scanning** — `claude_desktop_config.json`, `mcp.json`, `.mcp.json`, `cline_mcp_settings.json` and more are checked for permissive-default flags too, since that's where a real deployment actually sets them
 - ⚙️ **Configurable, never overridable** — `[tool.agentgauge]` in pyproject.toml adds project vocabulary, excludes, and disables categories; it can never make a rule stop recognizing its built-in defaults, and a config that would neuter a rule is rejected rather than honored
 - 🙈 **Inline suppression** — `# agentgauge: ignore[rule-id]` for incremental adoption, without ever weakening `FAIL_CRITICAL`
 - 🕳️ **Refuses to pass on nothing** — a scan that recognized no governance-relevant code reports `INCOMPLETE`, not a vacuous 100/100; `APPLICABLE SITES` is printed next to every score
@@ -131,6 +132,7 @@ flowchart LR
     CLI[cli.py<br/>argparse, output, exit codes] --> SC[scanner.py<br/>file walk + encoding-safe parse]
     CLI --> CFG
     SC -->|AST per file| CTX[FileContext<br/>cached views, alias map,<br/>sink tables, config, suppressions]
+    SC -->|JSON config files| JCS[configscan.py<br/>claude_desktop_config.json, mcp.json, ...]
     CTX --> R1[rules/oversight]
     CTX --> R2[rules/audit]
     CTX --> R3[rules/ratelimit]
@@ -138,6 +140,7 @@ flowchart LR
     CTX --> R5[rules/validation]
     CTX --> R6[rules/defaults]
     R1 & R2 & R3 & R4 & R5 & R6 --> AG[scoring.py<br/>cross-file aggregation + suppression]
+    JCS -->|merged into rule 6's category| AG
     AG --> REP[ScanReport]
     REP --> OUT1[human / JSON render]
     REP --> OUT2[sarif.py<br/>SARIF 2.1.0 render]
@@ -146,7 +149,8 @@ flowchart LR
 Design decisions that matter:
 
 - **Each rule is a plug-in** exposing `RULE_ID`, `CATEGORY`, `WEIGHT`, and `check(ctx) → (sites, passed, findings)`. Adding a seventh category means adding one file and registering it. See [CONTRIBUTING.md](CONTRIBUTING.md) for the invariants scoring relies on.
-- **Shared AST plumbing lives in one place** ([astutils.py](agentgauge/astutils.py)): the sink vocabulary, alias resolution, scope walking, suppression parsing, and the cached per-file views (`functions`, `sensitive_calls`, `tool_functions`, `parents`) that keep six rules from re-walking the same trees.
+- **Shared AST plumbing lives in one place** ([astutils.py](agentgauge/astutils.py)): the sink vocabulary, alias resolution, scope walking, suppression parsing, and the cached per-file views (`functions`, `sensitive_calls`, `tool_functions`, `parents`) that keep six rules from re-walking the same trees. **Shared file-walk plumbing** ([fswalk.py](agentgauge/fswalk.py)) does the same for the parts of "which files does a scan look at" that don't care whether a file is Python or JSON, so [configscan.py](agentgauge/configscan.py) (the JSON config-file scanner) and `scanner.py` share one implementation instead of two.
+- **JSON config-file findings are not a seventh rule.** [configscan.py](agentgauge/configscan.py) asks the exact same question as `rules/defaults.py` — is a recognized flag set to its dangerous value — sourced from `claude_desktop_config.json`/`mcp.json`/etc. instead of Python AST, and merges its (sites, passed, findings) into that same category. The 100-point weight model is untouched.
 - **Scoring semantics live in the models**, not the rules — rules report facts; [models.py](agentgauge/models.py) turns facts into numbers. Suppression, disabled rules, and scan warnings live in [scoring.py](agentgauge/scoring.py) as scan-wide concerns.
 - **Output rendering is decoupled from scoring** — [sarif.py](agentgauge/sarif.py) renders a `ScanReport` without `scoring.py` knowing SARIF exists.
 
@@ -351,9 +355,9 @@ Real problems this project had to solve — documented with their remaining limi
 - [x] **Inline suppression** — `# agentgauge: ignore[rule-id]`, without weakening `FAIL_CRITICAL`
 - [x] **SARIF output** — `--sarif` with a full invocation record for code-scanning ingestion
 - [x] **GitHub Action and pre-commit hook** — `uses: PreethamNoelP/agentgauge@v0.1.0`, or a `.pre-commit-config.yaml` entry
+- [x] **Config-file scanning** — catch permissive defaults living in `claude_desktop_config.json`, `mcp.json`, `.mcp.json`, `cline_mcp_settings.json`, `mcp_settings.json`, or any filename added via `extra_config_filenames`; merged into the same "Permissive defaults" category, not a new one
 - [ ] **Publish to PyPI** — plain `pip install agentgauge`, no git URL needed
 - [ ] **Baseline file** — `--baseline` so an existing repo can adopt agentgauge without fixing every finding on day one. Needs a decision first: a baseline that can silence a *critical* finding would be the one thing this tool promises cannot happen, and one that cannot is useless to exactly the repos that need it most
-- [ ] **Config-file scanning** — catch permissive defaults living in `claude_desktop_config.json`, `mcp.json`, …
 - [ ] **Pydantic/FastMCP schema awareness** — validate declared input models, not just parameters (the largest remaining rule-5 blind spot)
 - [ ] **Cross-module resolution** — a sink gated by a helper in another file is currently a false failure
 - [ ] **Plugin/entry-point rule system** — third-party rules without forking source

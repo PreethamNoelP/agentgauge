@@ -21,6 +21,31 @@ explicitly.
   `[tool.agentgauge] exclude` and `[tool.ruff] extend-exclude` both drop
   their `docs/vendor` entries accordingly.
 
+### Added
+
+- **JSON config-file scanning.** Every scan now also checks known MCP
+  client config filenames (`claude_desktop_config.json`, `mcp.json`,
+  `.mcp.json`, `cline_mcp_settings.json`, `mcp_settings.json`, extendable
+  via `extra_config_filenames`) for permissive-default flags — this closes
+  rule 6's largest documented blind spot, since real deployments set
+  `auto_approve`-shaped flags in JSON, not Python. Findings merge into the
+  existing "Permissive defaults" category (same rule id, same weight) —
+  this is not a seventh rule, and the 100-point model is unchanged.
+  `config_files_scanned` is a new field in the JSON/human/SARIF report.
+  `[tool.agentgauge] exclude` and `[tool.ruff]`-style `.venv`/`node_modules`
+  skip-dirs apply to config files exactly as they already do to `.py`
+  files, via the same shared matching (`agentgauge/fswalk.py`, extracted
+  from `scanner.py` so the JSON scanner could reuse it without a circular
+  import).
+
+### Fixed
+
+- **A directory containing only a recognized MCP config file (no `.py`
+  files at all) was rejected as "zero evidence" and exited 2.** The
+  zero-evidence guard checked `files_scanned` alone, which only counts
+  Python files; it now also accepts `config_files_scanned` as real
+  evidence. Found while smoke-testing the config-file scanner above.
+
 ### Changed
 
 - README examples for the GitHub Action and pre-commit hook now show the

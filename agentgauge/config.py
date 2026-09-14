@@ -40,7 +40,10 @@ _TUPLE_FIELDS = {"approval_markers", "rate_markers"}
 # with silently different settings than the author believed they had asked
 # for, which for a governance gate is the worst possible failure mode.
 _KNOWN_KEYS = frozenset(
-    {"min_score", "exclude", "disabled_rules", "assume_external_rate_limiting"}
+    {
+        "min_score", "exclude", "disabled_rules",
+        "assume_external_rate_limiting", "extra_config_filenames",
+    }
     | set(_VOCAB_KEYS)
 )
 
@@ -78,6 +81,11 @@ class Config:
 
     min_score: float | None = None
     exclude: tuple[str, ...] = ()
+    # Scan-level, like `exclude` -- not RuleConfig -- because filename
+    # discovery happens in scanner.py, not inside a rule's check(ctx).
+    # Additive to configscan.KNOWN_CONFIG_FILENAMES, matching the
+    # extra-vocabulary keys' "add, never override" convention.
+    extra_config_filenames: frozenset[str] = frozenset()
     rules: RuleConfig = field(default_factory=RuleConfig)
     # The file these settings came from, or None when no config was found.
     # Reported by the CLI: "my [tool.agentgauge] table was ignored" is
@@ -168,10 +176,16 @@ def _parse(data: dict[str, Any], source: str | None = None) -> Config:
         raise ConfigError("[tool.agentgauge] 'min_score' must be a number")
 
     exclude = _as_str_tuple(table.get("exclude", []), "exclude")
+    extra_config_filenames = frozenset(
+        _as_str_tuple(
+            table.get("extra_config_filenames", []), "extra_config_filenames"
+        )
+    )
 
     return Config(
         min_score=float(min_score) if min_score is not None else None,
         exclude=exclude,
+        extra_config_filenames=extra_config_filenames,
         rules=_build_rule_config(table),
         source=source,
     )

@@ -1,0 +1,15 @@
+{
+  "mcpServers": {
+    "shell": {
+      "command": "python",
+      "args": ["-m", "shell_server"],
+      "autoApprove": true,
+      "skip_confirmation": true
+    },
+    "filesystem": {
+      "command": "python",
+      "args": ["-m", "fs_server"],
+      "requireApproval": false
+    }
+  }
+}

@@ -83,7 +83,7 @@ def test_directory_with_no_python_files_returns_two(tmp_path, capsys):
     code = main([str(tmp_path)])
 
     assert code == 2
-    assert "no Python files" in capsys.readouterr().err
+    assert "no Python or MCP config files" in capsys.readouterr().err
 
 
 def test_all_files_unparseable_returns_two(tmp_path, capsys):
@@ -94,7 +94,22 @@ def test_all_files_unparseable_returns_two(tmp_path, capsys):
     err = capsys.readouterr().err
     assert code == 2
     assert "skipped" in err
-    assert "no Python files" in err
+    assert "no Python or MCP config files" in err
+
+
+def test_directory_with_only_a_config_file_is_not_zero_evidence(tmp_path, capsys):
+    # The bug this pins: files_scanned only counts .py files, so a
+    # directory holding nothing but a recognized MCP config JSON file used
+    # to be rejected as "zero evidence" even though the config scanner
+    # found and evaluated something real.
+    (tmp_path / "mcp.json").write_text('{"autoApprove": true}\n')
+
+    code = main([str(tmp_path), "--json"])
+
+    assert code == 0  # permissive-defaults is never critical
+    out = json.loads(capsys.readouterr().out)
+    assert out["config_files_scanned"] == 1
+    assert out["findings"][0]["rule"] == "permissive-defaults"
 
 
 def test_sarif_output_is_parseable(tmp_path, capsys):

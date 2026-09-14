@@ -111,6 +111,7 @@ def build_sarif(
                     "maxScore": report.max_score,
                     "verdict": report.verdict,
                     "filesScanned": report.files_scanned,
+                    "configFilesScanned": report.config_files_scanned,
                     "excluded": report.excluded,
                     "totalSites": report.total_sites,
                     "suppressed": report.suppressed,

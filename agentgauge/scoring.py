@@ -43,6 +43,11 @@ class ScanReport:
 
     categories: list[CategoryResult]
     files_scanned: int = 0
+    # JSON MCP config files (claude_desktop_config.json, mcp.json, ...)
+    # checked by configscan.py, merged into the "Permissive defaults"
+    # category above -- kept as its own counter so a reader can tell "0
+    # config files existed" from "some existed but weren't recognized".
+    config_files_scanned: int = 0
     skipped: list[str] = field(default_factory=list)
     # Files an `exclude` pattern kept out of the scan. A deliberate choice,
     # unlike `skipped` -- but an invisible one until now: the report said
@@ -147,6 +152,7 @@ class ScanReport:
             "max_score": self.max_score,
             "verdict": self.verdict,
             "files_scanned": self.files_scanned,
+            "config_files_scanned": self.config_files_scanned,
             "total_sites": self.total_sites,
             "critical_gate_active": not self.gate_disabled,
             "categories": [

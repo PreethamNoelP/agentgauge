@@ -56,6 +56,7 @@ def test_sarif_run_properties_carry_score_and_verdict():
         # scan that recognized nothing.
         "verdict": "INCOMPLETE",
         "filesScanned": 1,
+        "configFilesScanned": 0,
         "excluded": 0,
         "totalSites": 0,
         "suppressed": 0,

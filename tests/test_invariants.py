@@ -189,6 +189,7 @@ def test_json_report_top_level_keys_are_stable():
         "max_score",
         "verdict",
         "files_scanned",
+        "config_files_scanned",
         "total_sites",
         "critical_gate_active",
         "categories",
