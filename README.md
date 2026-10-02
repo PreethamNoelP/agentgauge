@@ -246,7 +246,7 @@ flowchart LR
   every rule shares.
 - **Two passes, bounded memory.** Pass one keeps only small per-file
   summaries (no AST nodes) for the cross-file index; parsed files are reused
-  in pass two up to 40 MB of source, after which they are re-parsed.
+  in pass two up to 8 MB of source, after which they are re-parsed.
 
 ## Validation
 

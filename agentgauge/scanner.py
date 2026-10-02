@@ -135,9 +135,11 @@ def _read_source(path: Path) -> str:
 
 
 # Parsed files are kept between the two passes while their total source
-# size stays under this; past it, pass 2 re-parses each file so memory
-# stays bounded by one file's AST however large the repository is.
-REUSE_PARSED_BYTES = 40_000_000
+# size stays under this; past it, pass 2 re-parses each file, so memory
+# stays bounded by one file's AST however large the repository is. A kept
+# file costs roughly 40x its source size (measured: 2.7 MB of source peaks
+# at ~104 MB kept, ~17 MB re-parsed), so 8 MB of source is ~300 MB.
+REUSE_PARSED_BYTES = 8_000_000
 
 
 def module_name(path: Path, root: Path) -> tuple[str, bool]:

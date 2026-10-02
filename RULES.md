@@ -470,9 +470,10 @@ upload resolves; run agentgauge from the repository root.
 Two passes: the first summarizes every file (entry points, call edges,
 logging), the second runs the rules against the whole-program index. Each
 file is walked once per pass into a shared node list, parent map, per-scope
-buckets and a definition index; parsed files are reused between passes
-while their total size stays under 40 MB, beyond which pass two re-parses
-so memory stays bounded by one file's AST.
+buckets and a definition index. Parsed files are reused between passes
+while their total source stays under 8 MB (a kept file costs roughly 40×
+its source size, so about 300 MB); beyond that, pass two re-parses each
+file and memory stays bounded by one file's AST.
 
 Measured on the same machine against the previous single-pass release
 (wall clock, `scan()` only, best of two):
