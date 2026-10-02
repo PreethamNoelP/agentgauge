@@ -14,6 +14,7 @@ from dataclasses import dataclass, field
 from functools import cached_property
 from typing import Iterator
 
+from agentgauge import suppression
 from agentgauge.config import RuleConfig
 
 # Full dotted names that always mean a sensitive action. Matched exactly,
@@ -313,7 +314,7 @@ def enclosing_function(
     return None
 
 
-"""Suppression marker patterns.
+"""Suppression marker introducer.
 
 Deliberately documented in a docstring rather than in `#` comments: this
 module is scanned by agentgauge like any other, and the tokenizer sees a
@@ -322,34 +323,9 @@ directive -- correctly, since that is exactly the "brackets forgotten"
 shape the strictness exists to catch. Writing the examples in a string
 keeps the module's own self-scan clean. See RULES.md.
 
-_SUPPRESS_RE matches the directive in either form: bare (suppresses every
-rule on that line) or bracketed with a comma-separated rule list -- the
-same shape as flake8's "noqa" and bandit's "nosec".
-
-The bracket group captures anything up to "]" rather than only well-formed
-rule ids on purpose. An earlier pattern accepted only [\\w, -]+ inside the
-brackets, which meant an empty or invalid list failed to match the
-bracketed alternative, fell back to the bare alternative, and silently
-escalated a narrow suppression into a blanket one. Matching greedily and
-validating afterwards keeps a malformed marker malformed. The \\b stops
-"ignored"/"ignoring" in prose from being read as a directive.
-
-_REASON_RE gates the trailing text. A free-text reason may follow, but it
-has to announce itself with "--", ":" or "#". A bare directive followed by
-bare prose is malformed, not blanket: forgetting the brackets around a
-rule name must not suppress every rule on the line, including rules added
-in later versions.
+Only the introducer lives here; the grammar is agentgauge/suppression.py.
 """
-_SUPPRESS_RE = re.compile(
-    r"#\s*agentgauge:\s*ignore\b[ \t]*(\[[^\]]*\])?[ \t]*(.*)$", re.IGNORECASE
-)
-_REASON_RE = re.compile(r"^(--|:|#)")
-
-_MARKER_RE = re.compile(r"agentgauge", re.IGNORECASE)
-
-# Rule ids are lowercase kebab-case ("human-oversight"). Anything else in a
-# suppression list is a typo, not a rule we might not know about yet.
-_RULE_ID_RE = re.compile(r"^[a-z][a-z0-9]*(?:-[a-z0-9]+)*$")
+_SUPPRESS_RE = suppression.marker_pattern(r"#")
 
 
 def _parse_suppressions(
@@ -372,39 +348,19 @@ def _parse_suppressions(
     """
     suppressions: dict[int, frozenset[str] | None] = {}
     malformed: list[tuple[int, str]] = []
-    # Tokenizing every file to find a marker almost none of them contain was
-    # ~8% of scan time. A source without the word cannot hold a marker.
-    if _MARKER_RE.search(source) is None:
+    if not suppression.contains_marker_word(source):
         return suppressions, malformed
     try:
         for tok in tokenize.generate_tokens(io.StringIO(source).readline):
             if tok.type != tokenize.COMMENT:
                 continue
-            match = _SUPPRESS_RE.search(tok.string)
-            if match is None:
+            marker = suppression.parse_marker(tok.string, _SUPPRESS_RE)
+            if marker is None:
                 continue
-            line = tok.start[0]
-            brackets = match.group(1)
-            trailing = match.group(2).strip()
-            if brackets is None:
-                if trailing and not _REASON_RE.match(trailing):
-                    malformed.append(
-                        (line, f"unexpected text after 'ignore': {trailing!r} "
-                               "-- name rules as ignore[rule-id], or start a "
-                               "reason with '--'")
-                    )
-                else:
-                    suppressions[line] = None
-                continue
-            rules = [r.strip().lower() for r in brackets[1:-1].split(",")]
-            rules = [r for r in rules if r]
-            if not rules:
-                malformed.append((line, "empty rule list in 'ignore[]'"))
-            elif any(not _RULE_ID_RE.match(r) for r in rules):
-                bad = next(r for r in rules if not _RULE_ID_RE.match(r))
-                malformed.append((line, f"'{bad}' is not a valid rule id"))
+            if marker.malformed is not None:
+                malformed.append((tok.start[0], marker.malformed))
             else:
-                suppressions[line] = frozenset(rules)
+                suppressions[tok.start[0]] = marker.rules
     except (tokenize.TokenError, SyntaxError, IndentationError):
         pass
     return suppressions, malformed
