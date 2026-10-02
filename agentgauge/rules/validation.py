@@ -41,7 +41,6 @@ from agentgauge.astutils import (
     FunctionNode,
     call_name,
     dotted_name,
-    enclosing_function,
     name_tokens,
     word_tokens,
 )
@@ -170,9 +169,7 @@ def _first_raw_use(
     fn: FunctionNode, ctx: FileContext, tokens: frozenset[str]
 ) -> dict[str, tuple[int, int]]:
     first: dict[str, tuple[int, int]] = {}
-    for call, _label in ctx.sensitive_calls:
-        if enclosing_function(call, ctx.parents) is not fn:
-            continue
+    for call, _label in ctx.sensitive_calls_by_function.get(id(fn), ()):
         position = (call.lineno, call.col_offset)
         for name in _raw_names(call, ctx, tokens):
             if name not in first or position < first[name]:

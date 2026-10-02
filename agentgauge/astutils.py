@@ -736,6 +736,22 @@ class FileContext:
         ]
 
     @cached_property
+    def sensitive_calls_by_function(
+        self,
+    ) -> dict[int, list[tuple[ast.Call, str]]]:
+        """sensitive_calls grouped by id() of the enclosing function, built
+        in one pass. A rule that asks "which sinks are in this function" for
+        every tool would otherwise rescan every sink in the file per tool --
+        quadratic in file size, and a few thousand tiny tools under the size
+        cap is enough to stall a scan for minutes."""
+        grouped: dict[int, list[tuple[ast.Call, str]]] = {}
+        for call, label in self.sensitive_calls:
+            fn = enclosing_function(call, self.parents)
+            if fn is not None:
+                grouped.setdefault(id(fn), []).append((call, label))
+        return grouped
+
+    @cached_property
     def sensitive_call_ids(self) -> frozenset[int]:
         return frozenset(id(call) for call, _label in self.candidate_sensitive_calls)
 
