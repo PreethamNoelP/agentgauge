@@ -9,8 +9,9 @@ rather than hiding it), and the scope statistics that say how much of the
 code was judged at all.
 """
 
+from collections.abc import Iterable
 from dataclasses import asdict, dataclass, field
-from typing import Any, Iterable
+from typing import Any
 
 from agentgauge.astutils import FileContext
 from agentgauge.config import AcceptedRisk
@@ -192,9 +193,7 @@ def _matches(risk: AcceptedRisk, finding: Finding, call: str | None) -> bool:
         qual = finding.function or "<module>"
         if risk.function not in (qual, qual.rsplit(".", 1)[-1]):
             return False
-    if risk.call is not None and risk.call != call:
-        return False
-    return True
+    return not (risk.call is not None and risk.call != call)
 
 
 def _finding_call(finding: Finding) -> str | None:

@@ -388,7 +388,7 @@ def test_no_floor_means_no_fail_score():
 def _risk(**kw):
     from agentgauge.config import AcceptedRisk
 
-    base = dict(rule="human-oversight", file="mem.py", reason="reviewed by the security team")
+    base = {"rule": "human-oversight", "file": "mem.py", "reason": "reviewed by the security team"}
     base.update(kw)
     return AcceptedRisk(**base)
 

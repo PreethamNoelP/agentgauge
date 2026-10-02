@@ -1,5 +1,6 @@
-import pytest
 import ast
+
+import pytest
 
 from agentgauge.astutils import (
     FileContext,

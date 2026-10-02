@@ -40,8 +40,8 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from agentgauge.config import Config  # noqa: E402
-from agentgauge.scanner import scan  # noqa: E402
+from agentgauge.config import Config
+from agentgauge.scanner import scan
 
 MEASURED_RULES = (
     "human-oversight",

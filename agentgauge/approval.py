@@ -28,10 +28,9 @@ sink passes), and a value is not traced further than one assignment.
 """
 
 import ast
-from collections.abc import Iterable
+from collections.abc import Callable, Iterable
 from dataclasses import dataclass
 from functools import lru_cache
-from typing import Callable
 
 from agentgauge.astutils import FunctionNode, call_name, iter_scope
 
@@ -175,9 +174,7 @@ class ApprovalAnalyzer:
             if isinstance(node, ast.Assign):
                 for t in node.targets:
                     bind(t, node.value)
-            elif isinstance(node, ast.AnnAssign):
-                bind(node.target, node.value)
-            elif isinstance(node, ast.NamedExpr):
+            elif isinstance(node, (ast.AnnAssign, ast.NamedExpr)):
                 bind(node.target, node.value)
             elif isinstance(node, ast.AugAssign):
                 bind(node.target, None)
@@ -264,9 +261,10 @@ class ApprovalAnalyzer:
                 continue
             if isinstance(node, ast.Attribute):
                 root = _root_name(node)
-                if root is None or root not in facts.params:
-                    if is_approval_name(node.attr, self.extra):
-                        return True
+                if (root is None or root not in facts.params) and is_approval_name(
+                    node.attr, self.extra
+                ):
+                    return True
                 stack.append(node.value)
                 continue
             stack.extend(ast.iter_child_nodes(node))
@@ -333,13 +331,14 @@ class ApprovalAnalyzer:
                     self._mentions(item.context_expr, facts) for item in parent.items
                 ):
                     return True
-            elif isinstance(parent, (ast.ListComp, ast.SetComp, ast.GeneratorExp, ast.DictComp)):
-                if any(
-                    self._mentions(cond, facts)
-                    for gen in parent.generators
-                    for cond in gen.ifs
-                ):
-                    return True
+            elif isinstance(
+                parent, (ast.ListComp, ast.SetComp, ast.GeneratorExp, ast.DictComp)
+            ) and any(
+                self._mentions(cond, facts)
+                for gen in parent.generators
+                for cond in gen.ifs
+            ):
+                return True
             for field_name in ("body", "orelse", "finalbody"):
                 block = getattr(parent, field_name, None)
                 if not isinstance(block, list):

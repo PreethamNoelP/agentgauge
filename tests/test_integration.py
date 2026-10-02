@@ -44,6 +44,7 @@ def test_python_dash_m_entrypoint_end_to_end():
     proc = subprocess.run(
         [sys.executable, "-m", "agentgauge", str(FIXTURES / "clean_server.py")],
         capture_output=True,
+        check=False,
         text=True,
         cwd=PROJECT_ROOT,
     )
@@ -59,6 +60,7 @@ def test_min_score_gate_end_to_end():
             "--min-score", "70",
         ],
         capture_output=True,
+        check=False,
         text=True,
         cwd=PROJECT_ROOT,
     )
@@ -71,6 +73,7 @@ def test_critical_verdict_fails_end_to_end_without_min_score():
     proc = subprocess.run(
         [sys.executable, "-m", "agentgauge", str(FIXTURES / "vulnerable_server.py")],
         capture_output=True,
+        check=False,
         text=True,
         cwd=PROJECT_ROOT,
     )

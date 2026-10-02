@@ -31,8 +31,9 @@ only from behind `if not request_approval(...): return` is not reported.
 
 import ast
 from collections import deque
+from collections.abc import Callable, Iterable
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING, Callable, Iterable
+from typing import TYPE_CHECKING
 
 from agentgauge.astutils import FunctionNode, dotted_name, word_tokens
 
@@ -419,9 +420,8 @@ class ProgramIndex:
                 return dotted.get(a, [])
             if kind == "method":
                 methods = summary.classes.get(a)
-                if methods is not None:
-                    if b in methods:
-                        return [methods[b]]
+                if methods is not None and b in methods:
+                    return [methods[b]]
                     # Inherited or defined elsewhere in the file.
                 return [
                     k for k in by_name[summary.path].get(b, [])

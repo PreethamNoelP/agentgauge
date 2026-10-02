@@ -2,12 +2,10 @@ import json
 
 import pytest
 
-from agentgauge import __version__
-from agentgauge import cli
+from agentgauge import __version__, cli
 from agentgauge.cli import _print_report, main
 from agentgauge.models import CategoryResult, Finding
 from agentgauge.scoring import ScanReport
-
 
 # A tool with every control present, so a test can add exactly one problem
 # to it and observe that problem alone.

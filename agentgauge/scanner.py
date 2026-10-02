@@ -10,8 +10,8 @@ verdict INCOMPLETE so a partial view never looks like a full pass.
 
 import os
 import tokenize
+from collections.abc import Callable, Iterator
 from pathlib import Path
-from typing import Callable, Iterator
 
 from agentgauge import callgraph, configscan
 from agentgauge.astutils import FileContext
@@ -21,8 +21,12 @@ from agentgauge.rules import defaults
 from agentgauge.scoring import ScanReport, score_contexts
 
 __all__ = [
-    "MAX_FILE_BYTES", "SKIP_DIRS", "is_excluded",
-    "iter_python_files", "escapes_scan_root", "scan",
+    "MAX_FILE_BYTES",
+    "SKIP_DIRS",
+    "escapes_scan_root",
+    "is_excluded",
+    "iter_python_files",
+    "scan",
 ]
 
 
@@ -227,7 +231,7 @@ def scan(target: str | Path, config: Config | None = None) -> ScanReport:
         for path in paths:
             rel = _display_path(path, root, cwd)
 
-            def note(reason: str) -> None:
+            def note(reason: str, path: Path = path, rel: str = rel) -> None:
                 # Some messages ("unknown encoding for <path>") embed the
                 # absolute path; report the same text on every machine.
                 skipped.append(f"{rel}: {_relativize(reason, path, rel)}")

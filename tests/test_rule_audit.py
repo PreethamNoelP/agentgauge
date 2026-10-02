@@ -1,5 +1,6 @@
-import pytest
 import dataclasses
+
+import pytest
 
 from agentgauge.astutils import FileContext
 from agentgauge.config import RuleConfig

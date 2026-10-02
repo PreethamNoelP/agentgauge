@@ -32,9 +32,10 @@ never reaches a sink unvalidated.
 """
 
 import ast
+from collections.abc import Iterator
 from dataclasses import dataclass
-from typing import Iterator
 
+from agentgauge.approval import is_approval_name
 from agentgauge.astutils import (
     FileContext,
     FunctionNode,
@@ -44,7 +45,6 @@ from agentgauge.astutils import (
     name_tokens,
     word_tokens,
 )
-from agentgauge.approval import is_approval_name
 from agentgauge.models import Finding
 
 RULE_ID = "input-validation"
@@ -348,6 +348,8 @@ def _argument_reads(
     if not dict_params:
         return
     for node in ctx.scope_nodes(fn):
+        if not isinstance(node, (ast.Subscript, ast.Call)):
+            continue
         key: str | None = None
         if (
             isinstance(node, ast.Subscript)

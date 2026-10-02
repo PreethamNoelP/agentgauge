@@ -113,7 +113,7 @@ def test_aliased_import_sensitive_call_is_still_a_site():
 
 
 def test_aliased_sys_exit_counts_as_a_loop_exit():
-    sites, passed, findings = run(
+    sites, passed, _findings = run(
         "import sys as s\n"
         "def poll():\n"
         "    while True:\n"
@@ -124,7 +124,7 @@ def test_aliased_sys_exit_counts_as_a_loop_exit():
 
 
 def test_broad_handler_that_discards_the_error_is_not_handling():
-    sites, passed, findings = run(
+    _sites, _passed, findings = run(
         "def f(p):\n    try:\n        os.remove(p)\n    except Exception:\n        pass\n"
     )
     call_sites = [f for f in findings if "os.remove" in f.message]

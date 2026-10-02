@@ -9,7 +9,7 @@ can't judge a value we can't see.
 """
 
 import ast
-from typing import Iterable, Iterator
+from collections.abc import Iterable, Iterator
 
 from agentgauge.astutils import FileContext
 from agentgauge.models import Finding

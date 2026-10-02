@@ -23,7 +23,7 @@ def judge(body: str, params: str = "path", config: RuleConfig | None = None):
 
 
 def gated(body: str, params: str = "path", config: RuleConfig | None = None) -> bool:
-    sites, passed, findings = judge(body, params, config)
+    sites, passed, _findings = judge(body, params, config)
     assert sites >= 1
     return sites == passed
 
@@ -109,7 +109,7 @@ def test_tool_argument_is_not_approval():
 
 
 def test_attribute_of_a_tool_argument_is_not_approval():
-    sites, passed, _ = judge(
+    _sites, passed, _ = judge(
         "if not args.confirmed:\n    return\nshutil.rmtree(args.path)", params="args"
     )
     assert passed == 0
@@ -118,14 +118,14 @@ def test_attribute_of_a_tool_argument_is_not_approval():
 def test_sink_cannot_approve_itself_through_config_vocabulary():
     # Config validation rejects such a marker; the analysis must not depend
     # on that alone.
-    sites, passed, _ = judge(
+    _sites, passed, _ = judge(
         "subprocess.run(path)", config=RuleConfig(approval_markers=("run",))
     )
     assert passed == 0
 
 
 def test_approval_named_receiver_inside_the_sink_does_not_count():
-    sites, passed, _ = judge("approval_client.charge(path)")
+    _sites, passed, _ = judge("approval_client.charge(path)")
     assert passed == 0
 
 

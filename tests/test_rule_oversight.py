@@ -178,7 +178,7 @@ def test_approval_in_an_unrelated_function_does_not_cover_a_module_level_call():
 
 def test_approval_in_a_nested_helper_does_not_cover_the_outer_call():
     # A check inside a helper does not run when the surrounding code does.
-    sites, passed, findings = run(
+    sites, passed, _findings = run(
         "import shutil\n"
         "def wipe(path):\n"
         "    def _helper():\n"
@@ -202,7 +202,7 @@ def test_module_level_approval_still_covers_a_module_level_call():
 def test_class_body_shares_the_module_scope():
     # A class body executes at definition time in the surrounding scope,
     # so a module-level approval check does cover it.
-    sites, passed, findings = run(
+    sites, passed, _findings = run(
         "import os\n"
         "if not confirm():\n"
         "    raise SystemExit\n"
@@ -213,7 +213,7 @@ def test_class_body_shares_the_module_scope():
 
 
 def test_own_decorator_still_counts_as_an_enforcing_position():
-    sites, passed, findings = run(
+    sites, passed, _findings = run(
         "import shutil\n"
         "@requires_approval\n"
         "def wipe(path):\n"
@@ -223,7 +223,7 @@ def test_own_decorator_still_counts_as_an_enforcing_position():
 
 
 def test_nested_function_decorator_does_not_cover_the_outer_call():
-    sites, passed, findings = run(
+    sites, passed, _findings = run(
         "import shutil\n"
         "def wipe(path):\n"
         "    @requires_approval\n"

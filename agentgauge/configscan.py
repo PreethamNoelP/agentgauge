@@ -19,10 +19,11 @@ CONTRIBUTING.md's "every rule must total 100" invariant).
 
 import json
 import re
+from collections.abc import Callable, Iterator
 from pathlib import Path
-from typing import Callable, Iterator
 
 from agentgauge.config import RuleConfig
+from agentgauge.fswalk import MAX_FILE_BYTES, SKIP_DIRS, is_excluded
 from agentgauge.models import Finding
 from agentgauge.rules.defaults import (
     DANGEROUS_WHEN_FALSE,
@@ -30,7 +31,6 @@ from agentgauge.rules.defaults import (
     RULE_ID,
     collapse_flag_name,
 )
-from agentgauge.fswalk import MAX_FILE_BYTES, SKIP_DIRS, is_excluded
 
 # Exact basenames recognized as MCP client configuration files, matched
 # case-sensitively like every other exclude/skip check in this tool.

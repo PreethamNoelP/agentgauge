@@ -1,5 +1,6 @@
-import pytest
 import dataclasses
+
+import pytest
 
 from agentgauge.astutils import FileContext
 from agentgauge.config import RuleConfig
@@ -100,7 +101,7 @@ def test_annotated_field_counts_as_validation():
 def test_annotated_without_field_does_not_count_as_validation():
     # Annotated[T, ...] alone carries no declared constraint -- only a
     # Field(...) call in the metadata is evidence.
-    sites, passed, findings = run(
+    sites, passed, _findings = run(
         "from typing import Annotated\n"
         "@mcp.tool()\n"
         "def query(query: Annotated[str, 'some docstring metadata']):\n"
@@ -110,7 +111,7 @@ def test_annotated_without_field_does_not_count_as_validation():
 
 
 def test_plain_str_annotation_does_not_count_as_validation():
-    sites, passed, findings = run(
+    sites, passed, _findings = run(
         "@mcp.tool()\n"
         "def read(path: str):\n"
         "    return open(path).read()\n"
@@ -120,7 +121,7 @@ def test_plain_str_annotation_does_not_count_as_validation():
 
 def test_extra_risky_param_from_config_is_a_site():
     config = RuleConfig(risky_param_tokens=frozenset({"apikey"}))
-    sites, passed, findings = run(
+    sites, passed, _findings = run(
         "@mcp.tool()\ndef configure(apikey):\n    store(apikey)\n",
         config=config,
     )

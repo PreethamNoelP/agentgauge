@@ -11,10 +11,10 @@ import io
 import re
 import tokenize
 from collections import deque
-from collections.abc import Iterable
+from collections.abc import Iterable, Iterator
 from dataclasses import dataclass, field
 from functools import cached_property
-from typing import TYPE_CHECKING, Iterator
+from typing import TYPE_CHECKING
 
 from agentgauge import suppression
 from agentgauge.config import RuleConfig
@@ -337,11 +337,13 @@ def _contextual_label(call: ast.Call, constants: dict[str, str]) -> str | None:
             noun = receiver.attr.lower().replace("_", "")
             if noun in PAYMENT_RESOURCES:
                 return "payment"
-    if func.attr in SQL_METHODS and call.args:
-        if _receiver_tokens(func) & SQL_RECEIVER_TOKENS and not _is_constant_query(
-            call.args[0], constants
-        ):
-            return "sql exec"
+    if (
+        func.attr in SQL_METHODS
+        and call.args
+        and _receiver_tokens(func) & SQL_RECEIVER_TOKENS
+        and not _is_constant_query(call.args[0], constants)
+    ):
+        return "sql exec"
     if func.attr in HTTP_WRITE_METHODS:
         url_args = list(call.args[:2]) + [
             kw.value for kw in call.keywords if kw.arg in ("url", "endpoint")
@@ -395,9 +397,7 @@ def build_string_constants(
             targets, value = list(node.targets), node.value
         elif isinstance(node, ast.AnnAssign) and node.value is not None:
             targets, value = [node.target], node.value
-        elif isinstance(node, (ast.AugAssign, ast.NamedExpr)):
-            targets = [node.target]
-        elif isinstance(node, (ast.For, ast.AsyncFor, ast.comprehension)):
+        elif isinstance(node, (ast.AugAssign, ast.NamedExpr, ast.For, ast.AsyncFor, ast.comprehension)):
             targets = [node.target]
         elif isinstance(node, ast.arg):
             poisoned.add(node.arg)
@@ -689,7 +689,7 @@ class FileContext:
     @cached_property
     def _defs_and_calls(self) -> tuple[list["FunctionNode"], list[ast.Call]]:
         """Every def/async def and every Call in the file, in walk order."""
-        functions: list["FunctionNode"] = []
+        functions: list[FunctionNode] = []
         calls: list[ast.Call] = []
         for node in self.all_nodes:
             if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
@@ -852,9 +852,7 @@ def iter_identifiers(scope: ast.AST) -> Iterator[str]:
             yield node.attr
         elif isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
             yield node.name
-        elif isinstance(node, ast.arg):
-            yield node.arg
-        elif isinstance(node, ast.keyword) and node.arg is not None:
+        elif isinstance(node, (ast.arg, ast.keyword)) and node.arg is not None:
             yield node.arg
 
 
