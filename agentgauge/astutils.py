@@ -461,14 +461,9 @@ def build_import_aliases(
     (documented in RULES.md).
     """
     aliases: dict[str, str] = {}
-    # Single walk. Assignments are set aside rather than resolved in place,
-    # because resolution has to happen *after* every import is known -- see
-    # the second loop. This used to be two full ast.walk passes over the
-    # tree, which measured as the most expensive thing a scan did per file.
-    # Collecting once and replaying the (much shorter) assignment list
-    # preserves the ordering the two-pass version relied on: ast.walk order
-    # is stable, so a chain like `_a = sh.rmtree` then `_b = _a` still
-    # resolves in document order.
+    # Assignments are set aside and resolved after every import is known
+    # (the second loop). Walk order is stable, so a chain like
+    # `_a = sh.rmtree` then `_b = _a` resolves in document order.
     assignments: list[ast.Assign] = []
     for node in nodes if nodes is not None else ast.walk(tree):
         if isinstance(node, ast.Import):
@@ -591,10 +586,10 @@ class FileContext:
     """Everything a rule needs to know about one parsed file. Rules all
     share one signature: check(ctx) -> (sites, passed, findings).
 
-    The `functions`, `sensitive_calls` and `tool_functions` views are cached
-    per file. Six rules asking the same three questions used to mean the
-    same subtrees were walked a dozen times over -- ast.walk is the whole
-    cost of a scan, and a rule should not have to know that to stay fast.
+    Every view is cached and derived from one walk of the tree (all_nodes):
+    the parent map, per-scope node buckets, the definition index, functions,
+    calls and sensitive calls. Reachability comes from `program`, the
+    scan-wide index, or from this file alone when there is none.
     """
 
     path: str
@@ -693,14 +688,7 @@ class FileContext:
 
     @cached_property
     def _defs_and_calls(self) -> tuple[list["FunctionNode"], list[ast.Call]]:
-        """Every def/async def and every Call in the file, from one walk.
-
-        `functions` and `sensitive_calls` are both wanted by nearly every
-        scan, and each used to walk the whole tree for itself. Binning both
-        node types in a single pass halves that; the lists hold references
-        to nodes the tree already owns, so the extra memory is one pointer
-        per def and per call, not a copy of anything.
-        """
+        """Every def/async def and every Call in the file, in walk order."""
         functions: list["FunctionNode"] = []
         calls: list[ast.Call] = []
         for node in self.all_nodes:

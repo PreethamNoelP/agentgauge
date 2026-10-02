@@ -262,9 +262,8 @@ def test_no_suppression_can_turn_a_critical_sink_into_a_pass(marker):
 # a markdown file is not a guarantee -- this test is.
 ALLOWED_STDLIB_IMPORTS = {
     "argparse", "ast", "collections", "dataclasses", "fnmatch", "functools",
-    "hashlib",
-    "io", "json",
-    "os", "pathlib", "re", "sys", "tokenize", "tomllib", "typing",
+    "hashlib", "io", "json", "os", "pathlib", "re", "sys", "tokenize",
+    "tomllib", "typing",
 }
 
 PACKAGE = Path(__file__).parent.parent / "agentgauge"
@@ -349,3 +348,53 @@ def test_agentgauge_scanning_itself_produces_no_warnings():
 
     assert unexpected == [], unexpected
     assert report.skipped == []
+
+
+# Path methods that can only mean a filesystem write, and os/shutil
+# functions that do. (str.replace and list.remove share names with the
+# latter, so those are matched only on an os/shutil receiver.)
+_PATH_WRITES = frozenset({
+    "write_text", "write_bytes", "mkdir", "makedirs", "unlink", "rmtree",
+    "touch", "symlink_to", "hardlink_to", "chmod",
+})
+_MODULE_WRITES = frozenset({"remove", "replace", "rename", "rmdir", "move", "copy"})
+
+
+def test_the_only_filesystem_write_is_the_baseline_the_user_asked_for():
+    # README: "Files written: only the baseline file you name with
+    # --update-baseline". Any other write-shaped call is a broken promise.
+    offenders = []
+    for source in sorted(PACKAGE.rglob("*.py")):
+        tree = ast.parse(source.read_text(encoding="utf-8"))
+        for fn in ast.walk(tree):
+            if not isinstance(fn, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                continue
+            for node in ast.walk(fn):
+                if not (isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute)):
+                    continue
+                attr = node.func.attr
+                receiver = node.func.value
+                on_module = isinstance(receiver, ast.Name) and receiver.id in ("os", "shutil")
+                if attr in _PATH_WRITES or (on_module and attr in _MODULE_WRITES):
+                    offenders.append(f"{source.name}:{fn.name}:{attr}")
+    assert offenders == ["baseline.py:write_baseline:write_text"], offenders
+
+
+def test_package_never_reads_the_environment():
+    # README: "Environment: never read."
+    for source in sorted(PACKAGE.rglob("*.py")):
+        for node in ast.walk(ast.parse(source.read_text(encoding="utf-8"))):
+            if isinstance(node, ast.Attribute):
+                assert node.attr not in ("environ", "getenv", "environb"), (
+                    f"{source.name}:{node.lineno} reads the environment"
+                )
+
+
+def test_readme_and_security_list_the_actual_imports():
+    expected = ", ".join(sorted(ALLOWED_STDLIB_IMPORTS))
+    root = PACKAGE.parent
+    readme = (root / "README.md").read_text(encoding="utf-8")
+    security = " ".join((root / "SECURITY.md").read_text(encoding="utf-8").split())
+    assert f"`{expected}`" in readme
+    assert f"`{expected}`" in security
+
