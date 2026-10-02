@@ -262,6 +262,7 @@ def test_no_suppression_can_turn_a_critical_sink_into_a_pass(marker):
 # a markdown file is not a guarantee -- this test is.
 ALLOWED_STDLIB_IMPORTS = {
     "argparse", "ast", "collections", "dataclasses", "fnmatch", "functools",
+    "hashlib",
     "io", "json",
     "os", "pathlib", "re", "sys", "tokenize", "tomllib", "typing",
 }
