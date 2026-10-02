@@ -149,6 +149,25 @@ SQL_RECEIVER_TOKENS = frozenset({
     "duckdb", "pool", "tx", "transaction",
 })
 
+# Payment-SDK resources (Stripe's stripe.Refund / client.refunds, and the
+# same nouns in Braintree, Adyen, Square, PayPal SDKs) and the methods that
+# move money on them: stripe.Refund.create(...), client.payment_intents
+# .confirm(...), gateway.transaction.sale(...).
+PAYMENT_RESOURCES = frozenset({
+    "charge", "charges", "paymentintent", "paymentintents", "refund",
+    "refunds", "transfer", "transfers", "payout", "payouts", "payment",
+    "payments", "transaction", "transactions", "subscription",
+    "subscriptions", "invoice", "invoices",
+})
+PAYMENT_METHODS = frozenset({
+    "create", "capture", "confirm", "pay", "send", "sale", "submit",
+    "create_and_confirm", "submit_for_settlement",
+})
+
+# Kubernetes client deletes: delete_namespaced_pod, delete_collection_
+# namespaced_secret, delete_cluster_role, ...
+REMOTE_DELETE_PREFIXES = ("delete_namespaced_", "delete_collection_", "delete_cluster_")
+
 # HTTP methods that create or move money when aimed at a payment API.
 HTTP_WRITE_METHODS = frozenset({"post", "put", "patch", "request", "fetch"})
 PAYMENT_HOSTS = (
@@ -308,6 +327,16 @@ def _contextual_label(call: ast.Call, constants: dict[str, str]) -> str | None:
     func = call.func
     if not isinstance(func, ast.Attribute):
         return None
+    if func.attr.startswith(REMOTE_DELETE_PREFIXES):
+        return "remote delete"
+    if func.attr in PAYMENT_METHODS:
+        receiver = func.value
+        while isinstance(receiver, ast.Call):
+            receiver = receiver.func
+        if isinstance(receiver, ast.Attribute):
+            noun = receiver.attr.lower().replace("_", "")
+            if noun in PAYMENT_RESOURCES:
+                return "payment"
     if func.attr in SQL_METHODS and call.args:
         if _receiver_tokens(func) & SQL_RECEIVER_TOKENS and not _is_constant_query(
             call.args[0], constants

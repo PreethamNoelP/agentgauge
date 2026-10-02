@@ -1,3 +1,4 @@
+import pytest
 import ast
 
 from agentgauge.astutils import (
@@ -522,3 +523,30 @@ def test_http_post_to_a_payment_api_is_a_payment_sink():
 def test_http_post_elsewhere_is_not_a_sink():
     assert labels("requests.post('https://example.com/api', data=d)\n") == []
     assert labels("requests.get('https://api.stripe.com/v1/charges')\n") == []
+
+
+@pytest.mark.parametrize("src", [
+    "stripe.Refund.create(charge=c)",
+    "stripe.PaymentIntent.confirm(pi)",
+    "client.payment_intents.create(amount=1)",
+    "client.v1.refunds.create(params)",
+    "gateway.transaction.sale({'amount': '10.00'})",
+    "stripe.Transfer.create(amount=1, destination=a)",
+])
+def test_payment_sdk_writes_are_payment_sinks(src):
+    assert labels(src + "\n") == ["payment"]
+
+
+@pytest.mark.parametrize("src", [
+    "stripe.Refund.retrieve(r)",
+    "client.payment_intents.list()",
+    "invoice_builder.create()",
+    "users.create(name=n)",
+])
+def test_payment_sdk_reads_and_unrelated_creates_are_not_sinks(src):
+    assert labels(src + "\n") == []
+
+
+def test_kubernetes_deletes_are_remote_delete_sinks():
+    assert labels("v1.delete_namespaced_pod(name, ns)\n") == ["remote delete"]
+    assert labels("v1.delete_collection_namespaced_secret(ns)\n") == ["remote delete"]
