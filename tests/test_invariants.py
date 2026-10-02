@@ -83,6 +83,7 @@ CORPUS = [
 
 CONFIGS = [
     RuleConfig(),
+    RuleConfig(scope="all"),
     RuleConfig(assume_external_rate_limiting=True),
     RuleConfig(approval_markers=("vet",), log_tokens=frozenset({"telemetry"})),
     RuleConfig(disabled_rules=frozenset({"rate-limiting"})),
@@ -92,6 +93,9 @@ CONFIGS = [
 def contexts(config: RuleConfig):
     for src in CORPUS:
         yield FileContext.from_source(src, path="mem.py", config=config)
+
+
+ALL = RuleConfig(scope="all")
 
 
 @pytest.mark.parametrize("src", CORPUS)
@@ -162,7 +166,7 @@ def test_scanning_the_same_tree_twice_gives_identical_json(tmp_path):
         (tmp_path / f"m{i:02d}.py").write_text(src)
     (tmp_path / "pkg").mkdir()
     (tmp_path / "pkg" / "server.py").write_text(
-        "import shutil\ndef wipe(p):\n    shutil.rmtree(p)\n"
+        "import shutil\n@mcp.tool()\ndef wipe(p):\n    shutil.rmtree(p)\n"
     )
 
     first = json.dumps(scan(tmp_path).to_dict(), indent=2)
@@ -187,13 +191,18 @@ def test_json_report_top_level_keys_are_stable():
     assert set(report.to_dict()) == {
         "score",
         "max_score",
+        "min_score",
         "verdict",
         "files_scanned",
         "config_files_scanned",
         "total_sites",
         "critical_gate_active",
+        "scope",
+        "tool_functions",
+        "out_of_scope_sensitive_calls",
         "categories",
         "findings",
+        "accepted_risks",
         "skipped",
         "excluded",
         "suppressed",
@@ -208,17 +217,19 @@ def test_json_finding_keys_are_stable():
     report = scan(FIXTURES / "vulnerable_server.py")
     finding = report.to_dict()["findings"][0]
 
-    assert set(finding) == {"rule", "file", "line", "message", "fix", "critical"}
+    assert set(finding) == {
+        "rule", "file", "line", "column", "function", "message", "fix", "critical"
+    }
 
 
-def test_verdict_is_always_one_of_three_values(tmp_path):
-    (tmp_path / "a.py").write_text("import shutil\ndef f(p):\n    shutil.rmtree(p)\n")
+def test_verdict_is_always_one_of_the_documented_values(tmp_path):
+    (tmp_path / "a.py").write_text("import shutil\n@mcp.tool()\ndef f(p):\n    shutil.rmtree(p)\n")
     (tmp_path / "b.py").write_text("def broken(:\n")
     (tmp_path / "c.py").write_text("auto_approve = False\n")
 
-    for config in (Config(), Config(exclude=("a.py",))):
+    for config in (Config(), Config(exclude=("a.py",)), Config(min_score=0)):
         assert scan(tmp_path, config=config).verdict in {
-            "PASS", "FAIL_CRITICAL", "INCOMPLETE"
+            "PASS", "FAIL_CRITICAL", "FAIL_SCORE", "INCOMPLETE"
         }
 
 
@@ -235,7 +246,7 @@ def test_verdict_is_always_one_of_three_values(tmp_path):
 )
 def test_no_suppression_can_turn_a_critical_sink_into_a_pass(marker):
     ctx = FileContext.from_source(
-        f"import shutil\ndef wipe(p):\n    shutil.rmtree(p)  {marker}\n",
+        f"import shutil\n@mcp.tool()\ndef wipe(p):\n    shutil.rmtree(p)  {marker}\n",
         path="mem.py",
     )
     report = score_contexts([ctx])
@@ -250,7 +261,8 @@ def test_no_suppression_can_turn_a_critical_sink_into_a_pass(marker):
 # on proprietary code has to be able to back that claim up, and a promise in
 # a markdown file is not a guarantee -- this test is.
 ALLOWED_STDLIB_IMPORTS = {
-    "argparse", "ast", "dataclasses", "fnmatch", "functools", "io", "json",
+    "argparse", "ast", "collections", "dataclasses", "fnmatch", "functools",
+    "io", "json",
     "os", "pathlib", "re", "sys", "tokenize", "tomllib", "typing",
 }
 
@@ -328,11 +340,11 @@ def test_agentgauge_scanning_itself_produces_no_warnings():
     """
     report = scan(PACKAGE)
 
-    # The one warning that IS expected here: the package has no sensitive
-    # calls, tool functions or governance flags of its own, so every category
-    # has zero sites. That note is the honest thing to say about a 100/100
-    # earned by having nothing to check -- see test_zero_applicable_sites.
-    unexpected = [w for w in report.warnings if "absence of anything" not in w]
+    # The one warning that IS expected here: the package defines no agent
+    # tools, so nothing in it is agent-reachable and nothing was judged.
+    unexpected = [
+        w for w in report.warnings if "no tool entry points recognized" not in w
+    ]
 
     assert unexpected == [], unexpected
     assert report.skipped == []

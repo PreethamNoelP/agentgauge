@@ -16,7 +16,7 @@ def test_sarif_has_one_rule_descriptor_per_registered_rule():
 
 
 def test_sarif_result_maps_critical_finding_to_error_level():
-    report = score_contexts([ctx("def wipe(path):\n    shutil.rmtree(path)\n")])
+    report = score_contexts([ctx("@mcp.tool()\ndef wipe(path):\n    shutil.rmtree(path)\n")])
     sarif = build_sarif(report)
     results = sarif["runs"][0]["results"]
     oversight_result = next(r for r in results if r["ruleId"] == "human-oversight")
@@ -103,7 +103,7 @@ def test_sarif_invocation_reports_skipped_files():
 
 def test_sarif_invocation_reports_scan_warnings():
     report = score_contexts(
-        [ctx("import shutil\ndef f(p):\n    shutil.rmtree(p)\n")],
+        [ctx("import shutil\n@mcp.tool()\ndef f(p):\n    shutil.rmtree(p)\n")],
         disabled_rules=frozenset({"human-oversight"}),
     )
 

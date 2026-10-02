@@ -229,3 +229,92 @@ def test_config_outside_the_working_directory_stays_absolute(tmp_path, monkeypat
 
     assert config.source.endswith("elsewhere/custom.toml")
     assert config.source.startswith(("/", tmp_path.drive or "/"))
+
+
+# --- scope, entry points, score floor -------------------------------------
+
+def test_default_min_score_is_the_documented_floor(tmp_path):
+    from agentgauge.config import DEFAULT_MIN_SCORE
+
+    assert load_config(tmp_path).min_score == DEFAULT_MIN_SCORE == 70.0
+
+
+def test_min_score_zero_disables_the_floor(tmp_path):
+    assert load(tmp_path, "[tool.agentgauge]\nmin_score = 0\n").min_score == 0.0
+
+
+@pytest.mark.parametrize("value", ["-1", "101"])
+def test_min_score_out_of_range_is_rejected(tmp_path, value):
+    with pytest.raises(ConfigError, match="between 0 and 100"):
+        load(tmp_path, f"[tool.agentgauge]\nmin_score = {value}\n")
+
+
+def test_scope_is_read_and_validated(tmp_path):
+    assert load(tmp_path, '[tool.agentgauge]\nscope = "all"\n').rules.scope == "all"
+    with pytest.raises(ConfigError, match="'scope' must be one of"):
+        load(tmp_path, '[tool.agentgauge]\nscope = "everything"\n')
+
+
+def test_extra_tool_decorators_and_entry_points(tmp_path):
+    config = load(
+        tmp_path,
+        "[tool.agentgauge]\n"
+        'extra_tool_decorators = ["expose"]\n'
+        'extra_tool_entry_points = ["handlers.dispatch"]\n',
+    )
+    assert config.rules.tool_decorators == frozenset({"expose"})
+    assert config.rules.entry_points == ("handlers.dispatch",)
+
+
+@pytest.mark.parametrize("marker", ["run", "exec", "load", "rmtree", "charge"])
+def test_approval_marker_matching_a_sink_name_is_rejected(tmp_path, marker):
+    # extra_approval_markers = ["run"] made every subprocess.run its own
+    # approval: the critical gate, switched off through a config file.
+    with pytest.raises(ConfigError, match="count as its own approval"):
+        load(tmp_path, f'[tool.agentgauge]\nextra_approval_markers = ["{marker}"]\n')
+
+
+def test_ordinary_approval_marker_is_accepted(tmp_path):
+    config = load(tmp_path, '[tool.agentgauge]\nextra_approval_markers = ["greenlight"]\n')
+    assert config.rules.approval_markers == ("greenlight",)
+
+
+# --- accepted risks ----------------------------------------------------------
+
+RISK = (
+    "[[tool.agentgauge.accepted_risks]]\n"
+    'rule = "human-oversight"\n'
+    'file = "src/server.py"\n'
+    'function = "rebuild"\n'
+    'reason = "runs a fixed make target, no model input reaches it"\n'
+)
+
+
+def test_accepted_risk_is_parsed(tmp_path):
+    from agentgauge.config import AcceptedRisk
+
+    config = load(tmp_path, "[tool.agentgauge]\n" + RISK)
+    assert config.accepted_risks == (
+        AcceptedRisk(
+            rule="human-oversight",
+            file="src/server.py",
+            function="rebuild",
+            reason="runs a fixed make target, no model input reaches it",
+        ),
+    )
+
+
+@pytest.mark.parametrize("broken, message", [
+    (RISK.replace('reason = "runs a fixed make target, no model input reaches it"', 'reason = "ok"'), "must explain"),
+    (RISK.replace('rule = "human-oversight"', 'rule = "oversight"'), "unknown rule"),
+    (RISK.replace('file = "src/server.py"\n', ""), "'file' is required"),
+    (RISK + 'line = 3\n', "unknown key"),
+])
+def test_malformed_accepted_risk_is_rejected(tmp_path, broken, message):
+    with pytest.raises(ConfigError, match=message):
+        load(tmp_path, "[tool.agentgauge]\n" + broken)
+
+
+def test_accepted_risks_must_be_an_array_of_tables(tmp_path):
+    with pytest.raises(ConfigError, match="array of tables"):
+        load(tmp_path, '[tool.agentgauge]\naccepted_risks = ["x"]\n')

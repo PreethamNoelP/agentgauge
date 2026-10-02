@@ -1,15 +1,15 @@
 """Optional project configuration: `[tool.agentgauge]` in pyproject.toml.
 
-Reading a config file is opt-in in effect, not just in name: every field
-defaults to the exact behavior agentgauge had before this module existed
-(nothing excluded, nothing disabled, no extra vocabulary). A scan with no
-config file present behaves identically to one that finds an empty table.
+A scan with no config file behaves identically to one with an empty table.
+Validation is strict: an unknown key, an unknown rule id, a malformed value,
+or a vocabulary entry that would neuter its rule is an error, never a
+silent no-op.
 
-Two independent concerns are split into two dataclasses:
+Two dataclasses:
   - RuleConfig travels with every FileContext and is read by rule modules
-    (vocabulary extensions, assume_external_rate_limiting).
-  - Config is scan-level only (which rules run at all, min-score default,
-    path excludes) and is consumed by scanner.py / cli.py, never by a rule.
+    (vocabulary extensions, scope, entry points).
+  - Config is scan-level (disabled rules, min score, excludes, accepted
+    risks) and is consumed by scanner.py / scoring.py / cli.py.
 """
 
 import os
@@ -43,9 +43,21 @@ _KNOWN_KEYS = frozenset(
     {
         "min_score", "exclude", "disabled_rules",
         "assume_external_rate_limiting", "extra_config_filenames",
+        "scope", "extra_tool_decorators", "extra_tool_entry_points",
+        "accepted_risks",
     }
     | set(_VOCAB_KEYS)
 )
+
+SCOPES = ("tools", "all")
+
+# The score a scan must reach for a PASS verdict when neither --min-score
+# nor `min_score` says otherwise. `min_score = 0` turns the floor off.
+DEFAULT_MIN_SCORE = 70.0
+
+_ACCEPTED_RISK_KEYS = frozenset({"rule", "file", "function", "call", "reason"})
+# Long enough that "ok" or "fp" is not a justification.
+_MIN_REASON_LENGTH = 15
 
 # Vocabulary entries are matched as substrings or stems, so a very short one
 # matches nearly every identifier: extra_approval_markers = ["e"] makes the
@@ -53,6 +65,22 @@ _KNOWN_KEYS = frozenset(
 # turns the critical gate off through a config file. Three characters is
 # short enough for real words ("vet") and long enough not to be a wildcard.
 _MIN_VOCAB_LENGTH = 3
+
+
+@dataclass(frozen=True)
+class AcceptedRisk:
+    """A reviewed decision that a specific finding is an acceptable risk.
+
+    Matches findings by rule and file, optionally narrowed to an enclosing
+    function and the sensitive call's name. A matching finding is removed
+    from the failing set -- critical or not -- and listed in every report
+    under "accepted risks" together with its reason."""
+
+    rule: str
+    file: str
+    reason: str
+    function: str | None = None
+    call: str | None = None
 
 
 class ConfigError(Exception):
@@ -73,13 +101,18 @@ class RuleConfig:
     risky_param_tokens: frozenset[str] = frozenset()
     dangerous_when_true: frozenset[str] = frozenset()
     dangerous_when_false: frozenset[str] = frozenset()
+    # "tools": judge only code reachable from a recognized tool entry point.
+    # "all": treat every function that performs a sensitive action as a tool.
+    scope: str = "tools"
+    tool_decorators: frozenset[str] = frozenset()
+    entry_points: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)
 class Config:
     """Everything loaded from [tool.agentgauge]."""
 
-    min_score: float | None = None
+    min_score: float | None = DEFAULT_MIN_SCORE
     exclude: tuple[str, ...] = ()
     # Scan-level, like `exclude` -- not RuleConfig -- because filename
     # discovery happens in scanner.py, not inside a rule's check(ctx).
@@ -87,6 +120,7 @@ class Config:
     # extra-vocabulary keys' "add, never override" convention.
     extra_config_filenames: frozenset[str] = frozenset()
     rules: RuleConfig = field(default_factory=RuleConfig)
+    accepted_risks: tuple[AcceptedRisk, ...] = ()
     # The file these settings came from, or None when no config was found.
     # Reported by the CLI: "my [tool.agentgauge] table was ignored" is
     # otherwise invisible, and discovery deliberately does not search
@@ -117,6 +151,65 @@ def _as_vocabulary(value: object, key: str) -> tuple[str, ...]:
     return entries
 
 
+def _check_marker_is_not_a_sink(entry: str) -> None:
+    """An approval marker that also matches a sensitive call's own name
+    would let that call approve itself: extra_approval_markers = ["run"]
+    makes every subprocess.run its own approval."""
+    from agentgauge.astutils import SENSITIVE_EXACT, SENSITIVE_SUFFIX
+
+    needle = entry.lower().replace("_", "")
+    for sink in (*SENSITIVE_EXACT, *SENSITIVE_SUFFIX):
+        if needle in sink.lower().replace("_", "").replace(".", ""):
+            raise ConfigError(
+                f"[tool.agentgauge] 'extra_approval_markers' entry {entry!r} "
+                f"also matches the sensitive call '{sink}', which would then "
+                "count as its own approval"
+            )
+
+
+def _as_accepted_risks(value: object) -> tuple[AcceptedRisk, ...]:
+    if not isinstance(value, list) or not all(isinstance(v, dict) for v in value):
+        raise ConfigError(
+            "[tool.agentgauge] 'accepted_risks' must be an array of tables "
+            "([[tool.agentgauge.accepted_risks]])"
+        )
+    risks = []
+    for i, entry in enumerate(value):
+        where = f"[tool.agentgauge] accepted_risks[{i}]"
+        unknown = sorted(set(entry) - _ACCEPTED_RISK_KEYS)
+        if unknown:
+            raise ConfigError(
+                f"{where}: unknown key(s) {', '.join(map(repr, unknown))}; "
+                f"valid keys are {', '.join(sorted(_ACCEPTED_RISK_KEYS))}"
+            )
+        for required in ("rule", "file", "reason"):
+            if not isinstance(entry.get(required), str) or not entry[required].strip():
+                raise ConfigError(f"{where}: '{required}' is required and must be a string")
+        for optional in ("function", "call"):
+            if optional in entry and not isinstance(entry[optional], str):
+                raise ConfigError(f"{where}: '{optional}' must be a string")
+        if entry["rule"] not in RULE_IDS:
+            raise ConfigError(
+                f"{where}: unknown rule {entry['rule']!r}; valid ids are "
+                f"{', '.join(RULE_IDS)}"
+            )
+        if len(entry["reason"].strip()) < _MIN_REASON_LENGTH:
+            raise ConfigError(
+                f"{where}: 'reason' must explain the decision "
+                f"(at least {_MIN_REASON_LENGTH} characters)"
+            )
+        risks.append(
+            AcceptedRisk(
+                rule=entry["rule"],
+                file=entry["file"].strip().replace("\\", "/").removeprefix("./"),
+                reason=entry["reason"].strip(),
+                function=entry.get("function"),
+                call=entry.get("call"),
+            )
+        )
+    return tuple(risks)
+
+
 def _build_rule_config(table: dict[str, Any]) -> RuleConfig:
     kwargs: dict[str, Any] = {}
 
@@ -137,10 +230,26 @@ def _build_rule_config(table: dict[str, Any]) -> RuleConfig:
         )
     kwargs["assume_external_rate_limiting"] = assume_external
 
+    scope = table.get("scope", "tools")
+    if scope not in SCOPES:
+        raise ConfigError(
+            f"[tool.agentgauge] 'scope' must be one of {', '.join(map(repr, SCOPES))}"
+        )
+    kwargs["scope"] = scope
+    kwargs["tool_decorators"] = frozenset(
+        _as_vocabulary(table.get("extra_tool_decorators", []), "extra_tool_decorators")
+    )
+    kwargs["entry_points"] = _as_vocabulary(
+        table.get("extra_tool_entry_points", []), "extra_tool_entry_points"
+    )
+
     for toml_key, field_name in _VOCAB_KEYS.items():
         if toml_key not in table:
             continue
         values = _as_vocabulary(table[toml_key], toml_key)
+        if toml_key == "extra_approval_markers":
+            for value in values:
+                _check_marker_is_not_a_sink(value)
         normalized = tuple(v.lower() for v in values)
         kwargs[field_name] = (
             normalized if field_name in _TUPLE_FIELDS else frozenset(normalized)
@@ -167,13 +276,13 @@ def _parse(data: dict[str, Any], source: str | None = None) -> Config:
             f"{', '.join(sorted(_KNOWN_KEYS))}"
         )
 
-    min_score = table.get("min_score")
+    min_score = table.get("min_score", DEFAULT_MIN_SCORE)
     # bool is a subclass of int in Python, so `min_score = true` would
     # otherwise silently become a threshold of 1.0.
-    if min_score is not None and (
-        isinstance(min_score, bool) or not isinstance(min_score, (int, float))
-    ):
+    if isinstance(min_score, bool) or not isinstance(min_score, (int, float)):
         raise ConfigError("[tool.agentgauge] 'min_score' must be a number")
+    if not 0 <= min_score <= 100:
+        raise ConfigError("[tool.agentgauge] 'min_score' must be between 0 and 100")
 
     exclude = _as_str_tuple(table.get("exclude", []), "exclude")
     extra_config_filenames = frozenset(
@@ -183,10 +292,11 @@ def _parse(data: dict[str, Any], source: str | None = None) -> Config:
     )
 
     return Config(
-        min_score=float(min_score) if min_score is not None else None,
+        min_score=float(min_score),
         exclude=exclude,
         extra_config_filenames=extra_config_filenames,
         rules=_build_rule_config(table),
+        accepted_risks=_as_accepted_risks(table.get("accepted_risks", [])),
         source=source,
     )
 

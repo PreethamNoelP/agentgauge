@@ -10,12 +10,18 @@ import ast
 import io
 import re
 import tokenize
+from collections import deque
+from collections.abc import Iterable
 from dataclasses import dataclass, field
 from functools import cached_property
-from typing import Iterator
+from typing import TYPE_CHECKING, Iterator
 
 from agentgauge import suppression
 from agentgauge.config import RuleConfig
+
+if TYPE_CHECKING:
+    from agentgauge.approval import ApprovalAnalyzer
+    from agentgauge.callgraph import ProgramIndex
 
 # Full dotted names that always mean a sensitive action. Matched exactly,
 # so harmless lookalikes (platform.system, df.eval) are not flagged.
@@ -345,13 +351,15 @@ def sensitive_label(
     return label
 
 
-def build_string_constants(tree: ast.AST) -> dict[str, str]:
+def build_string_constants(
+    tree: ast.AST, nodes: Iterable[ast.AST] | None = None
+) -> dict[str, str]:
     """Names bound only to string literals anywhere in the file (`QUERY =
     "SELECT ..."`, `STRIPE_URL = "https://api.stripe.com/v1"`). A name that
     is ever bound to anything else is left out: its value is not known."""
     values: dict[str, str] = {}
     poisoned: set[str] = set()
-    for node in ast.walk(tree):
+    for node in nodes if nodes is not None else ast.walk(tree):
         targets: list[ast.expr] = []
         value: ast.expr | None = None
         if isinstance(node, ast.Assign):
@@ -387,7 +395,9 @@ def iter_sensitive_calls(
                 yield node, label
 
 
-def build_import_aliases(tree: ast.AST) -> dict[str, str]:
+def build_import_aliases(
+    tree: ast.AST, nodes: Iterable[ast.AST] | None = None
+) -> dict[str, str]:
     """Map every locally-bound import name to the dotted name it actually
     refers to, so a call written through an import binding resolves to its
     canonical target instead of vanishing behind the local spelling:
@@ -431,7 +441,7 @@ def build_import_aliases(tree: ast.AST) -> dict[str, str]:
     # is stable, so a chain like `_a = sh.rmtree` then `_b = _a` still
     # resolves in document order.
     assignments: list[ast.Assign] = []
-    for node in ast.walk(tree):
+    for node in nodes if nodes is not None else ast.walk(tree):
         if isinstance(node, ast.Import):
             for alias in node.names:
                 if alias.asname is not None:
@@ -474,9 +484,9 @@ def iter_scope(scope: ast.AST) -> Iterator[ast.AST]:
     it is written.
     """
     yield scope
-    queue = list(ast.iter_child_nodes(scope))
+    queue = deque(ast.iter_child_nodes(scope))
     while queue:
-        node = queue.pop(0)
+        node = queue.popleft()
         if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
             continue
         yield node
@@ -566,6 +576,12 @@ class FileContext:
     # (line, reason) for suppression comments that could not be parsed; they
     # grant no exemption and are reported as warnings by the scoring pass.
     malformed_suppressions: list[tuple[int, str]] = field(default_factory=list)
+    # Dotted module name, for resolving calls from other files.
+    module: str = ""
+    # Whole-scan reachability. None means "this file on its own".
+    program: "ProgramIndex | None" = None
+    _parent_map: dict[ast.AST, ast.AST] = field(default_factory=dict, repr=False)
+    _scope_buckets: dict[int, list[ast.AST]] = field(default_factory=dict, repr=False)
 
     @classmethod
     def from_source(
@@ -573,29 +589,58 @@ class FileContext:
         source: str,
         path: str = "<memory>",
         config: RuleConfig | None = None,
+        module: str = "",
+        program: "ProgramIndex | None" = None,
     ) -> "FileContext":
         tree = ast.parse(source)
         suppressions, malformed = _parse_suppressions(source)
-        return cls(
+        ctx = cls(
             path=path,
             tree=tree,
-            import_aliases=build_import_aliases(tree),
             config=config if config is not None else RuleConfig(),
             suppressions=suppressions,
             malformed_suppressions=malformed,
+            module=module,
+            program=program,
         )
+        ctx.import_aliases = build_import_aliases(tree, ctx.all_nodes)
+        return ctx
+
+    @cached_property
+    def all_nodes(self) -> list[ast.AST]:
+        """Every node in the file in ast.walk order, from a single walk that
+        also builds the parent map. Rules filter this list instead of each
+        walking the tree again -- a tree walk is the whole cost of a scan."""
+        nodes: list[ast.AST] = []
+        parents: dict[ast.AST, ast.AST] = {}
+        buckets: dict[int, list[ast.AST]] = {}
+        queue: deque[tuple[ast.AST, ast.AST]] = deque([(self.tree, self.tree)])
+        while queue:
+            node, scope = queue.popleft()
+            nodes.append(node)
+            buckets.setdefault(id(scope), []).append(node)
+            for child in ast.iter_child_nodes(node):
+                parents[child] = node
+                child_scope = (
+                    child if isinstance(child, (ast.FunctionDef, ast.AsyncFunctionDef))
+                    else scope
+                )
+                queue.append((child, child_scope))
+        self._parent_map = parents
+        self._scope_buckets = buckets
+        return nodes
+
+    def scope_nodes(self, scope: ast.AST) -> list[ast.AST]:
+        """The same nodes iter_scope(scope) yields, precomputed: `scope`
+        itself and everything executing in it, nested defs excluded."""
+        self.all_nodes  # noqa: B018 -- builds the buckets as a side effect
+        return self._scope_buckets.get(id(scope), [scope])
 
     @cached_property
     def parents(self) -> dict[ast.AST, ast.AST]:
-        """Node -> parent, built on first use.
-
-        Every question that needs it ("what function encloses this call?",
-        "is this call in a try body?") starts from a sensitive call, so a
-        file with no sinks -- most files in most repos -- never builds it.
-        That saves both a full tree walk and a dict entry per AST node,
-        which is the largest single allocation a scan makes.
-        """
-        return build_parent_map(self.tree)
+        """Node -> parent (AST nodes carry no parent pointer)."""
+        self.all_nodes  # noqa: B018 -- builds the parent map as a side effect
+        return self._parent_map
 
     @cached_property
     def _defs_and_calls(self) -> tuple[list["FunctionNode"], list[ast.Call]]:
@@ -609,7 +654,7 @@ class FileContext:
         """
         functions: list["FunctionNode"] = []
         calls: list[ast.Call] = []
-        for node in ast.walk(self.tree):
+        for node in self.all_nodes:
             if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
                 functions.append(node)
             elif isinstance(node, ast.Call):
@@ -624,7 +669,7 @@ class FileContext:
     @cached_property
     def string_constants(self) -> dict[str, str]:
         """Names bound only to string literals (see build_string_constants)."""
-        return build_string_constants(self.tree)
+        return build_string_constants(self.tree, self.all_nodes)
 
     @cached_property
     def sensitive_calls(self) -> list[tuple[ast.Call, str]]:
@@ -638,26 +683,93 @@ class FileContext:
         ]
 
     @cached_property
-    def tool_functions(self) -> set["FunctionNode"]:
-        """The functions held to tool-governance standards (rules 2, 3, 5).
+    def sensitive_call_ids(self) -> frozenset[int]:
+        return frozenset(id(call) for call, _label in self.sensitive_calls)
 
-        Same population as is_tool_function() over every function, computed
-        the other way round: rather than re-scanning each function's subtree
-        for sinks, walk up from each known sink and mark the functions
-        enclosing it. O(sinks x depth) instead of O(functions x size), and
-        the sink list is already cached.
-        """
-        tools = {
-            fn for fn in self.functions
-            if has_tool_decorator(fn, self.import_aliases)
-        }
-        for call, _label in self.sensitive_calls:
-            node = self.parents.get(call)
-            while node is not None:
-                if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
-                    tools.add(node)
-                node = self.parents.get(node)
-        return tools
+    def is_sensitive(self, call: ast.Call) -> bool:
+        return id(call) in self.sensitive_call_ids
+
+    def enclosing_scope(self, node: ast.AST) -> ast.AST:
+        """The function a node executes in, or the module tree."""
+        fn = enclosing_function(node, self.parents)
+        return fn if fn is not None else self.tree
+
+    @cached_property
+    def approval(self) -> "ApprovalAnalyzer":
+        """Approval-dominance analysis for this file (see approval.py)."""
+        from agentgauge.approval import ApprovalAnalyzer
+
+        return ApprovalAnalyzer(
+            self.tree,
+            self.parents,
+            self.import_aliases,
+            self.config.approval_markers,
+            self.is_sensitive,
+            self.scope_nodes,
+        )
+
+    @cached_property
+    def index(self) -> "ProgramIndex":
+        """Reachability facts: the scan-wide index if one was supplied,
+        otherwise one built from this file alone."""
+        if self.program is not None:
+            return self.program
+        from agentgauge.callgraph import ProgramIndex, summarize
+
+        module = self.module or self.path.rsplit("/", 1)[-1].removesuffix(".py")
+        return ProgramIndex.build(
+            [summarize(self, module)], self.config.scope, self.config.entry_points
+        )
+
+    def key(self, fn: "FunctionNode") -> tuple[str, int, int]:
+        return (self.path, fn.lineno, fn.col_offset)
+
+    def is_entry(self, fn: "FunctionNode") -> bool:
+        """True if the model can call this function directly."""
+        return self.key(fn) in self.index.entries
+
+    def in_scope(self, fn: "FunctionNode | None") -> bool:
+        """True if code in `fn` (None: module level) is judged at all. With
+        scope = "tools" that is code reachable from a tool entry point."""
+        if self.index.scope == "all":
+            return True
+        return fn is not None and self.key(fn) in self.index.reachable
+
+    def is_gated(self, fn: "FunctionNode") -> bool:
+        """True if every reachable call path into `fn` passes an approval
+        check (or `fn` has an approval decorator)."""
+        return self.key(fn) in self.index.gated
+
+    def is_protected(self, fn: "FunctionNode") -> bool:
+        """True if every reachable call into `fn` sits in a try body whose
+        handler deals with the failure."""
+        return self.key(fn) in self.index.protected
+
+    def logs_via_calls(self, fn: "FunctionNode") -> bool:
+        return self.key(fn) in self.index.logs_closure
+
+    def rate_limited_via_calls(self, fn: "FunctionNode") -> bool:
+        return self.key(fn) in self.index.rate_closure
+
+    def qualname(self, fn: "FunctionNode | None") -> str | None:
+        if fn is None:
+            return None
+        return self.index.qualnames.get(self.key(fn), fn.name)
+
+    @cached_property
+    def tool_functions(self) -> set["FunctionNode"]:
+        """Tool entry points in this file: the functions held to
+        tool-governance standards by rules 2, 3 and 5."""
+        entries = self.index.entries
+        return {fn for fn in self.functions if self.key(fn) in entries}
+
+    @cached_property
+    def out_of_scope_sensitive_calls(self) -> int:
+        """Sensitive calls not reachable from any tool, so not judged."""
+        return sum(
+            1 for call, _label in self.sensitive_calls
+            if not self.in_scope(enclosing_function(call, self.parents))
+        )
 
     def is_suppressed(self, rule: str, line: int) -> bool:
         """True if an `# agentgauge: ignore` comment on this line covers
@@ -698,28 +810,3 @@ def name_tokens(name: str) -> set[str]:
     'audit_log' -> {'audit', 'log'}; 'logger.info' -> {'logger', 'info'}.
     Token matching avoids substring accidents like 'log' inside 'login'."""
     return {t for t in re.split(r"[._]", name.lower()) if t}
-
-
-def has_tool_decorator(
-    fn: FunctionNode, aliases: dict[str, str] | None = None
-) -> bool:
-    """True if any decorator names a tool (@mcp.tool(), @tool, @app.tool)."""
-    for dec in fn.decorator_list:
-        target = dec.func if isinstance(dec, ast.Call) else dec
-        name = dotted_name(target, aliases)
-        if name is not None and "tool" in name_tokens(name):
-            return True
-    return False
-
-
-def is_tool_function(fn: FunctionNode, aliases: dict[str, str] | None = None) -> bool:
-    """A "tool function" is what per-function governance rules apply to:
-    either it is decorated as a tool (@mcp.tool(), @tool, ...) or it
-    performs a sensitive action itself.
-
-    Rules should prefer FileContext.tool_functions, which answers this for
-    every function in the file at once without re-walking subtrees.
-    test_astutils pins the two to the same answer."""
-    if has_tool_decorator(fn, aliases):
-        return True
-    return next(iter_sensitive_calls(fn, aliases), None) is not None

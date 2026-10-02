@@ -79,23 +79,60 @@ def test_critical_verdict_fails_end_to_end_without_min_score():
 
 
 def test_vulnerable_fixture_covers_every_detection_shape():
-    # Each shape below is one a previous version of agentgauge scored as
-    # clean. Pinning them here means a regression fails the fixture gate
-    # in CI, not just a unit test someone might delete.
+    # Each tool below is a shape some version of agentgauge, or an obvious
+    # implementation of it, scored as clean. Pinning each one by name means
+    # a regression names what broke instead of just moving a number.
     report = scan(FIXTURES / "vulnerable_server.py")
-    messages = " ".join(f.message for f in report.findings)
+    critical_in = {
+        f.function for f in report.findings
+        if f.rule == "human-oversight" and f.critical
+    }
 
-    for expected in [
-        "subprocess.run",                    # plain dotted sink
-        "subprocess.check_call",             # module-level sink
-        "shutil.rmtree",                     # rebound sink (rm = shutil.rmtree)
-        "unlink",                            # pathlib, dynamic receiver
-        "asyncio.create_subprocess_shell",   # async sink
-        "pickle.loads",                      # deserialization
-        "eval",                              # code exec
-        "at module level",                   # scope-limited approval check
+    for tool in [
+        "delete_path",                      # plain dotted sink
+        "run_via_from_import",              # from-import alias
+        "wipe_via_rebinding",               # rebound sink
+        "unlink_file",                      # dynamic receiver
+        "shell_async",                      # asyncio sink
+        "load_state",                       # deserialization
+        "evaluate",                         # eval
+        "approve_after_the_fact",           # approval after the sink
+        "model_confirms_itself",            # approval from a tool argument
+        "authz_is_not_approval",            # machine authz, not a human
+        "hardcoded_approval",               # constant-bound approval flag
+        "humanize_is_not_a_human",          # vocabulary lookalike
+        "check_output_validates_nothing",   # sink named like a validator
+        "run_query",                        # dynamic SQL
+        "refund_via_http",                  # payment over plain HTTP
+        "dynamic_lookup",                   # getattr(os, "system")
+        "_remove_tree",                     # helper reached from a tool
+        "delete_requested",                 # input-model field
+        "handle_call",                      # low-level call_tool dispatch
+        "ShellTool._run",                   # class-based tool
+        "clean_directory",                  # registered via tools=[...]
     ]:
-        assert expected in messages, expected
+        assert tool in critical_in, tool
+
+    messages = {f.function: f.message for f in report.findings}
+    assert "model chooses" in " ".join(
+        f.message for f in report.findings if f.function == "model_confirms_itself"
+    )
+    assert any(
+        "silently discards" in f.message
+        for f in report.findings if f.function == "swallowed_failure"
+    )
+    assert any(
+        f.rule == "input-validation" and "input model 'FileRequest'" in f.message
+        for f in report.findings
+    )
+    assert any(
+        f.rule == "input-validation" and "argument 'path'" in f.message
+        for f in report.findings
+    )
+    assert messages  # every finding names its function
+    # The module-level setup call is not agent-reachable: counted, not judged.
+    assert report.out_of_scope_sensitive_calls == 1
+    assert not any(f.function is None and f.rule == "human-oversight" for f in report.findings)
 
 
 def test_clean_fixture_exercises_every_category():

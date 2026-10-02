@@ -1,22 +1,19 @@
 """Scoring aggregator: run every rule over every parsed file, merge the
 per-file (sites, passed, findings) tuples into per-category CategoryResults,
-and wrap them in a ScanReport with the 0-100 governance score.
+and wrap them in a ScanReport with the 0-100 score and the verdict.
 
-Contexts are consumed one at a time, so peak memory is a single file's
-AST no matter how large the scanned repo is.
-
-No rule logic lives here and no point math either -- points are derived in
-CategoryResult.score. This module only counts and collects -- plus two
-scan-wide concerns that don't belong inside any single rule: skipping
-disabled rules entirely, and honoring inline `# agentgauge: ignore`
-suppressions by converting a suppressed finding into a pass rather than
-just hiding it (a hidden failure would silently understate the score).
+Contexts are consumed one at a time; no rule logic or point math lives
+here. Scan-wide concerns do: disabled rules, inline suppressions and
+accepted risks (each converts a failing site into a recorded, visible pass
+rather than hiding it), and the scope statistics that say how much of the
+code was judged at all.
 """
 
 from dataclasses import asdict, dataclass, field
 from typing import Any, Iterable
 
 from agentgauge.astutils import FileContext
+from agentgauge.config import AcceptedRisk
 from agentgauge.models import CategoryResult, Finding
 from agentgauge.rules import (
     audit,
@@ -30,11 +27,25 @@ from agentgauge.rules import (
 # The single registry every downstream consumer (scanner, CLI) uses.
 ALL_RULES = [oversight, audit, ratelimit, errorhandling, validation, defaults]
 
-# Rules whose findings are the only source of `critical`, and therefore of
-# FAIL_CRITICAL. Disabling one of these does not just drop a category from
-# the score -- it removes the gate itself, which is why ScanReport refuses
-# to call such a scan a PASS (see ScanReport.verdict).
+# Rules whose findings are the source of `critical`, and therefore of
+# FAIL_CRITICAL. Disabling one removes the gate itself, so such a scan is
+# never a PASS (see ScanReport.verdict).
 CRITICAL_GATE_RULES = frozenset({oversight.RULE_ID})
+
+VERDICTS = ("PASS", "FAIL_CRITICAL", "FAIL_SCORE", "INCOMPLETE")
+
+
+@dataclass(frozen=True)
+class AcceptedFinding:
+    finding: Finding
+    reason: str
+
+
+@dataclass(frozen=True)
+class ToolFunction:
+    file: str
+    line: int
+    name: str
 
 
 @dataclass
@@ -43,32 +54,22 @@ class ScanReport:
 
     categories: list[CategoryResult]
     files_scanned: int = 0
-    # JSON MCP config files (claude_desktop_config.json, mcp.json, ...)
-    # checked by configscan.py, merged into the "Permissive defaults"
-    # category above -- kept as its own counter so a reader can tell "0
-    # config files existed" from "some existed but weren't recognized".
     config_files_scanned: int = 0
     skipped: list[str] = field(default_factory=list)
-    # Files an `exclude` pattern kept out of the scan. A deliberate choice,
-    # unlike `skipped` -- but an invisible one until now: the report said
-    # "scanned 1 file(s)" whether or not config had removed a hundred more.
-    # Counted so a reader can tell a small repo from a filtered one.
     excluded: int = 0
     suppressed: int = 0
     critical_suppressed: int = 0
-    # Human-readable notes about the scan itself rather than the code:
-    # unparseable or unknown-rule suppression comments, disabled rules that
-    # matter to the verdict. Reported, never silently swallowed.
+    suppressed_findings: list[Finding] = field(default_factory=list)
+    accepted: list[AcceptedFinding] = field(default_factory=list)
     warnings: list[str] = field(default_factory=list)
-    # Critical-gate-bearing rules that config turned off for this scan.
     gate_disabled: tuple[str, ...] = ()
-    # Baseline mode (agentgauge/baseline.py), set by cli.py after scan()
-    # returns -- scan()/score_contexts() know nothing about --baseline,
-    # deliberately: baseline is a CLI-level adoption convenience layered on
-    # top of the score/verdict, never a way to change either of them (see
-    # baseline.py's module docstring). Always present so the JSON/SARIF
-    # shape is consistent whether or not --baseline was passed, matching
-    # `skipped`/`warnings`'s own "empty list when unused" convention.
+    # "tools": only code reachable from a tool entry point was judged.
+    scope: str = "tools"
+    tool_functions: list[ToolFunction] = field(default_factory=list)
+    out_of_scope_sensitive_calls: int = 0
+    # The PASS threshold. None: no score floor (library use).
+    min_score: float | None = None
+    # Baseline mode, set by cli.py; never affects score or verdict.
     baseline_applied: bool = False
     baseline_new: list[Finding] = field(default_factory=list)
 
@@ -78,92 +79,66 @@ class ScanReport:
 
     @property
     def max_score(self) -> int:
-        """Normally 100. Lower only if [tool.agentgauge] disabled_rules
-        removed a category from this scan entirely -- the max score shrinks
-        honestly rather than silently renormalizing the rest up to 100,
-        which would hide that a category was turned off at all."""
+        """Normally 100; lower only if disabled_rules removed a category.
+        The maximum shrinks honestly instead of renormalizing to 100."""
         return sum(c.weight for c in self.categories)
 
     @property
+    def total_sites(self) -> int:
+        return sum(c.sites for c in self.categories)
+
+    @property
+    def no_tools_found(self) -> bool:
+        """Python was scanned in tool scope, but no tool entry point was
+        recognized -- so nothing agent-reachable was judged."""
+        return self.scope == "tools" and self.files_scanned > 0 and not self.tool_functions
+
+    @property
     def verdict(self) -> str:
-        """PASS / FAIL_CRITICAL / INCOMPLETE -- a gate independent of the
-        0-100 score. A single ungated critical action (payment, file
-        delete, shell exec, code exec, remote delete) must fail outright;
-        averaging it against every other compliant site would dilute a
-        catastrophic finding into a passing score -- the critical-site
-        dilution problem RULES.md describes. Skipped files
-        mean the scan didn't see the whole picture, so a clean result over
-        a partial view is not a full PASS either.
+        """PASS / FAIL_CRITICAL / FAIL_SCORE / INCOMPLETE.
 
-        An inline `# agentgauge: ignore` suppression on a *critical* finding
-        still trips this gate -- it is removed from the visible findings
-        list and credited toward the score (see score_contexts), but it
-        must not be able to buy back FAIL_CRITICAL. A one-line comment
-        silently clearing the one guarantee this tool exists to make would
-        just be critical-site dilution wearing a suppression comment
-        instead of an average; critical_suppressed exists specifically
-        so it can't.
+        FAIL_CRITICAL: an agent-reachable critical action (payment, file
+        delete, shell/code exec, dynamic SQL, remote delete) has no approval
+        check before it. No score, suppression comment or baseline buys it
+        back; only a fix or a reviewed `accepted_risks` entry does.
 
-        `disabled_rules` cannot buy it back either, for exactly the same
-        reason. Turning off the rule that produces critical findings does
-        not make the scan clean, it makes it blind -- so a scan without the
-        gate is reported INCOMPLETE, never PASS. Unlike a suppression this
-        cannot be FAIL_CRITICAL: with the rule switched off we never looked
-        for the sinks, so we have no finding to fail on and no honest way to
-        claim one. INCOMPLETE is the truthful answer, and
-        --fail-on-incomplete is how CI turns it into a red build.
+        FAIL_SCORE: no critical finding, but the score is below the floor.
 
-        A scan with zero applicable *sites* is INCOMPLETE for the same
-        reason, and this was the last way to get a vacuous PASS. Every
-        category scores full marks when it never applied (see
-        CategoryResult.score), so a repo agentgauge recognized nothing in
-        scores exactly 100.0/100 -- and used to report PASS and exit 0
-        under `--min-score 100 --fail-on-incomplete`, the strictest
-        invocation available. That is reachable without any hostile intent:
-        an agent codebase built on an SDK whose sinks are not in our tables,
-        or an `exclude` pattern that happens to cover the one file that
-        mattered. The arithmetic is right and the conclusion a CI consumer
-        draws from it is wrong, so the verdict now says so. Like a disabled
-        gate this cannot be FAIL_CRITICAL: we found nothing to fail on.
+        INCOMPLETE: the scan cannot support a PASS -- a file could not be
+        parsed, the critical-gate rule is disabled, nothing applicable was
+        found, or no tool entry point was recognized.
         """
         if any(f.critical for f in self.findings) or self.critical_suppressed:
             return "FAIL_CRITICAL"
-        if self.skipped or self.gate_disabled or self.total_sites == 0:
+        if self.min_score is not None and self.score < self.min_score:
+            return "FAIL_SCORE"
+        if self.skipped or self.gate_disabled or self.total_sites == 0 or self.no_tools_found:
             return "INCOMPLETE"
         return "PASS"
 
     @property
-    def total_sites(self) -> int:
-        """Applicable sites across every category. Zero means the scan found
-        no governance-relevant code at all -- no sensitive calls, no tool
-        functions, no flags -- so the score is the "zero sites, full marks"
-        rule applied six times over, not evidence of governance."""
-        return sum(c.sites for c in self.categories)
-
-    @property
     def findings(self) -> list[Finding]:
-        """All findings across categories, in a fully specified order.
-
-        File and line first, then rule and message: two findings can share a
-        location (one call is a site for both oversight and error handling),
-        and leaving their order to sort stability would make it depend on
-        rule registration order -- a diff between two runs of the same
-        commit is exactly what a CI consumer must never see.
-        """
+        """All findings across categories, in a fully specified order (two
+        findings can share a location, so file and line alone would leave
+        their order to rule registration)."""
         return sorted(
             (f for c in self.categories for f in c.findings),
-            key=lambda f: (f.file, f.line, f.rule, f.message),
+            key=lambda f: (f.file, f.line, f.column, f.rule, f.message),
         )
 
     def to_dict(self) -> dict[str, Any]:
         return {
             "score": round(self.score, 1),
             "max_score": self.max_score,
+            "min_score": self.min_score,
             "verdict": self.verdict,
             "files_scanned": self.files_scanned,
             "config_files_scanned": self.config_files_scanned,
             "total_sites": self.total_sites,
             "critical_gate_active": not self.gate_disabled,
+            "scope": self.scope,
+            "tool_functions": [asdict(t) for t in self.tool_functions],
+            "out_of_scope_sensitive_calls": self.out_of_scope_sensitive_calls,
             "categories": [
                 {
                     "name": c.name,
@@ -175,6 +150,9 @@ class ScanReport:
                 for c in self.categories
             ],
             "findings": [asdict(f) for f in self.findings],
+            "accepted_risks": [
+                {**asdict(a.finding), "reason": a.reason} for a in self.accepted
+            ],
             "skipped": self.skipped,
             "excluded": self.excluded,
             "suppressed": self.suppressed,
@@ -186,14 +164,9 @@ class ScanReport:
 
 
 def _suppression_warnings(ctx: FileContext, known_rule_ids: set[str]) -> list[str]:
-    """Report suppression comments that do not do what their author meant.
-
-    A suppression is the one mechanism by which a human overrides this tool,
-    so a broken one must be loud. Two shapes are reported: markers that could
-    not be parsed at all (they grant no exemption), and well-formed markers
-    naming a rule id that does not exist -- usually a typo, and silently
-    ineffective otherwise.
-    """
+    """Suppression comments that do not do what their author meant: markers
+    that could not be parsed (they grant nothing), and markers naming a rule
+    id that does not exist."""
     notes = [
         f"{ctx.path}:{line}: malformed agentgauge suppression ({reason}) "
         "-- nothing was suppressed"
@@ -210,9 +183,36 @@ def _suppression_warnings(ctx: FileContext, known_rule_ids: set[str]) -> list[st
     return notes
 
 
+def _matches(risk: AcceptedRisk, finding: Finding, call: str | None) -> bool:
+    if risk.rule != finding.rule:
+        return False
+    if finding.file != risk.file and not finding.file.endswith("/" + risk.file):
+        return False
+    if risk.function is not None:
+        qual = finding.function or "<module>"
+        if risk.function not in (qual, qual.rsplit(".", 1)[-1]):
+            return False
+    if risk.call is not None and risk.call != call:
+        return False
+    return True
+
+
+def _finding_call(finding: Finding) -> str | None:
+    """The sink name quoted in a finding message ("... call 'x.y' ...")."""
+    marker = " call '"
+    start = finding.message.find(marker)
+    if start < 0:
+        return None
+    start += len(marker)
+    end = finding.message.find("'", start)
+    return finding.message[start:end] if end > start else None
+
+
 def score_contexts(
     contexts: Iterable[FileContext],
     disabled_rules: frozenset[str] = frozenset(),
+    accepted_risks: tuple[AcceptedRisk, ...] = (),
+    scope: str = "tools",
 ) -> ScanReport:
     active_rules = [rule for rule in ALL_RULES if rule.RULE_ID not in disabled_rules]
     categories = [
@@ -220,53 +220,73 @@ def score_contexts(
         for rule in active_rules
     ]
     known_rule_ids = {rule.RULE_ID for rule in ALL_RULES}
-    files_scanned = 0
-    suppressed = 0
-    critical_suppressed = 0
-    warnings: list[str] = []
+    report = ScanReport(categories=categories, scope=scope)
+    used_risks: set[int] = set()
     for ctx in contexts:  # one context alive at a time; never materialized
-        files_scanned += 1
-        warnings.extend(_suppression_warnings(ctx, known_rule_ids))
+        report.files_scanned += 1
+        report.warnings.extend(_suppression_warnings(ctx, known_rule_ids))
+        report.tool_functions.extend(
+            ToolFunction(ctx.path, fn.lineno, ctx.qualname(fn) or fn.name)
+            for fn in sorted(ctx.tool_functions, key=lambda f: (f.lineno, f.col_offset))
+        )
+        report.out_of_scope_sensitive_calls += ctx.out_of_scope_sensitive_calls
         for rule, cat in zip(active_rules, categories):
             sites, passed, findings = rule.check(ctx)
             kept = []
             for f in findings:
-                # An inline suppression turns a failing site into a passing
-                # one -- a human made a visible, on-the-record decision to
-                # accept the risk, which is itself a form of oversight. It
-                # must not just vanish, or the score would look better than
-                # the scan actually found. But a *critical* one still counts
-                # against the verdict (see ScanReport.verdict) -- suppressing
-                # the noise must not double as suppressing the one gate this
-                # tool cannot let a score buy back.
-                if ctx.is_suppressed(f.rule, f.line):
+                risk_index = next(
+                    (
+                        i for i, risk in enumerate(accepted_risks)
+                        if _matches(risk, f, _finding_call(f))
+                    ),
+                    None,
+                )
+                if risk_index is not None:
+                    # A reviewed, recorded decision: the site passes and the
+                    # finding is listed with its reason in every report.
+                    used_risks.add(risk_index)
                     passed += 1
-                    suppressed += 1
+                    report.accepted.append(
+                        AcceptedFinding(f, accepted_risks[risk_index].reason)
+                    )
+                elif ctx.is_suppressed(f.rule, f.line):
+                    # Credited toward the score, but a critical one still
+                    # trips the verdict: an inline comment is not a review.
+                    passed += 1
+                    report.suppressed += 1
+                    report.suppressed_findings.append(f)
                     if f.critical:
-                        critical_suppressed += 1
+                        report.critical_suppressed += 1
                 else:
                     kept.append(f)
             cat.sites += sites
             cat.passed += passed
             cat.findings.extend(kept)
-    gate_disabled = tuple(sorted(disabled_rules & CRITICAL_GATE_RULES))
-    for rule_id in gate_disabled:
-        warnings.append(
+
+    report.gate_disabled = tuple(sorted(disabled_rules & CRITICAL_GATE_RULES))
+    for rule_id in report.gate_disabled:
+        report.warnings.append(
             f"'{rule_id}' is disabled, which removes the FAIL_CRITICAL gate "
             "entirely -- no ungated payment, deletion or shell-exec call can "
             "be detected in this scan, so its verdict is INCOMPLETE"
         )
-    report = ScanReport(
-        categories=categories,
-        files_scanned=files_scanned,
-        suppressed=suppressed,
-        critical_suppressed=critical_suppressed,
-        warnings=warnings,
-        gate_disabled=gate_disabled,
-    )
-    if files_scanned and report.total_sites == 0:
-        warnings.append(
-            f"no governance-relevant sites found in {files_scanned} file(s): "
+    for i, risk in enumerate(accepted_risks):
+        if i not in used_risks:
+            report.warnings.append(
+                f"accepted_risks entry for {risk.rule} in {risk.file}"
+                + (f" ({risk.function})" if risk.function else "")
+                + " matched no finding -- remove it if the risk is gone"
+            )
+    if report.no_tools_found:
+        report.warnings.append(
+            f"no tool entry points recognized in {report.files_scanned} file(s), "
+            "so no agent-reachable code was judged and the verdict is INCOMPLETE. "
+            "If this is agent code, name its tools with extra_tool_decorators / "
+            "extra_tool_entry_points, or set scope = \"all\""
+        )
+    elif report.files_scanned and report.total_sites == 0:
+        report.warnings.append(
+            f"no governance-relevant sites found in {report.files_scanned} file(s): "
             "this score reflects the absence of anything to check, not "
             "evidence of governance -- the verdict is INCOMPLETE for that "
             "reason, and --fail-on-incomplete turns it into a red build"

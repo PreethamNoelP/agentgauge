@@ -1,9 +1,15 @@
+import dataclasses
+
 from agentgauge.astutils import FileContext
 from agentgauge.config import RuleConfig
 from agentgauge.rules import oversight
 
 
-def run(src: str, config: RuleConfig | None = None):
+def run(src: str, config: RuleConfig | None = None, scope: str = "all"):
+    """Rule mechanics are tested in scope "all" (every function with a sink
+    is a tool), so a snippet needs no tool decorator to be judged. Tool-
+    scope behavior has its own tests below and in test_callgraph.py."""
+    config = dataclasses.replace(config or RuleConfig(), scope=scope)
     return oversight.check(FileContext.from_source(src, path="mem.py", config=config))
 
 

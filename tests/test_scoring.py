@@ -10,11 +10,13 @@ def ctx(src: str, path: str = "mem.py", config: RuleConfig | None = None) -> Fil
 
 
 WIDE_OPEN = (
+    "@mcp.tool()\n"
     "def wipe(path):\n"
     "    shutil.rmtree(path)\n"
 )
 
 FULLY_GOVERNED = (
+    "@mcp.tool()\n"
     "@mcp.tool()\n"
     "def wipe(path):\n"
     "    if not path.startswith('/data/'):\n"
@@ -114,7 +116,7 @@ def test_critical_finding_fails_verdict_regardless_of_score():
 def test_non_critical_finding_alone_does_not_fail_verdict():
     # A permissive-defaults finding with no accompanying sensitive call is
     # not critical; it must lower the score without tripping the gate.
-    report = score_contexts([ctx("auto_approve = True\n")])
+    report = score_contexts([ctx(FULLY_GOVERNED + "auto_approve = True\n")])
     assert report.findings and not any(f.critical for f in report.findings)
     assert report.verdict == "PASS"
 
@@ -226,6 +228,7 @@ def test_suppressing_a_critical_finding_still_forces_fail_critical():
     # that score-averaging itself is barred from buying back.
     report = score_contexts(
         [ctx(
+            "@mcp.tool()\n"
             "def wipe(path):\n"
             "    shutil.rmtree(path)  # agentgauge: ignore[human-oversight]\n"
         )]
@@ -237,7 +240,7 @@ def test_suppressing_a_critical_finding_still_forces_fail_critical():
 
 def test_suppressing_a_non_critical_finding_does_not_affect_verdict():
     report = score_contexts(
-        [ctx("auto_approve = True  # agentgauge: ignore\n")]
+        [ctx(FULLY_GOVERNED + "auto_approve = True  # agentgauge: ignore\n")]
     )
     assert report.critical_suppressed == 0
     assert report.verdict == "PASS"
@@ -248,6 +251,7 @@ def test_suppressing_a_non_critical_finding_does_not_affect_verdict():
 def test_malformed_suppression_is_reported_as_a_warning():
     ctx = FileContext.from_source(
         "import shutil\n"
+        "@mcp.tool()\n"
         "def wipe(path):\n"
         "    shutil.rmtree(path)  # agentgauge: ignore[]\n",
         path="mem.py",
@@ -272,7 +276,7 @@ def test_unknown_rule_id_in_a_suppression_is_reported_as_a_warning():
 
 def test_valid_suppression_produces_no_warning():
     ctx = FileContext.from_source(
-        "auto_approve = True  # agentgauge: ignore[permissive-defaults]\n",
+        FULLY_GOVERNED + "auto_approve = True  # agentgauge: ignore[permissive-defaults]\n",
         path="mem.py",
     )
     report = score_contexts([ctx])
@@ -289,7 +293,7 @@ def test_disabling_human_oversight_cannot_produce_a_pass():
     # a clean PASS and exited 0 -- the whole point of the gate, defeated
     # by one config line.
     report = score_contexts(
-        [ctx("import shutil\ndef wipe(path):\n    shutil.rmtree(path)\n")],
+        [ctx("import shutil\n@mcp.tool()\ndef wipe(path):\n    shutil.rmtree(path)\n")],
         disabled_rules=frozenset({"human-oversight"}),
     )
 
@@ -301,7 +305,7 @@ def test_disabling_human_oversight_cannot_produce_a_pass():
 
 def test_disabling_a_non_gate_rule_leaves_the_verdict_alone():
     report = score_contexts(
-        [ctx("auto_approve = True\n")],
+        [ctx(FULLY_GOVERNED + "auto_approve = True\n")],
         disabled_rules=frozenset({"rate-limiting"}),
     )
 
@@ -313,17 +317,32 @@ def test_disabling_a_non_gate_rule_leaves_the_verdict_alone():
 # --- a score over zero applicable sites is not evidence of governance ---
 
 def test_zero_applicable_sites_is_reported_as_such():
-    report = score_contexts([ctx("def add(a, b):\n    return a + b\n")])
+    report = score_contexts(
+        [ctx("def add(a, b):\n    return a + b\n", config=RuleConfig(scope="all"))],
+        scope="all",
+    )
 
     assert report.score == 100.0
     assert report.total_sites == 0
     assert any("absence of anything to check" in w for w in report.warnings)
 
 
-def test_any_applicable_site_suppresses_the_zero_site_warning():
-    report = score_contexts([ctx("auto_approve = False\n")])
+def test_no_tool_entry_points_is_reported_and_incomplete():
+    # Code with sinks but no recognizable tool is not agent code as far as
+    # the scan can tell; judging it would only produce noise, and calling
+    # it PASS would claim a review that never happened.
+    report = score_contexts([ctx("import shutil\ndef wipe(p):\n    shutil.rmtree(p)\n")])
 
-    assert report.total_sites == 1
+    assert report.tool_functions == []
+    assert report.out_of_scope_sensitive_calls == 1
+    assert report.verdict == "INCOMPLETE"
+    assert any("no tool entry points recognized" in w for w in report.warnings)
+
+
+def test_any_applicable_site_suppresses_the_zero_site_warning():
+    report = score_contexts([ctx(FULLY_GOVERNED + "auto_approve = False\n")])
+
+    assert report.total_sites > 0
     assert report.warnings == []
 
 
@@ -332,10 +351,86 @@ def test_findings_order_is_fully_specified():
     # for both oversight and error handling). Their relative order must not
     # depend on rule registration order, or two runs of the same commit
     # would produce different JSON.
-    report = score_contexts([ctx("import shutil\ndef f(p):\n    shutil.rmtree(p)\n")])
+    report = score_contexts([ctx("import shutil\n@mcp.tool()\ndef f(p):\n    shutil.rmtree(p)\n")])
 
     same_line = [f for f in report.findings if f.line == 3]
     assert [f.rule for f in same_line] == sorted(f.rule for f in same_line)
     assert report.findings == sorted(
-        report.findings, key=lambda f: (f.file, f.line, f.rule, f.message)
+        report.findings, key=lambda f: (f.file, f.line, f.column, f.rule, f.message)
     )
+
+
+# --- score floor ------------------------------------------------------------
+
+def test_score_below_the_floor_is_fail_score():
+    report = score_contexts([ctx(FULLY_GOVERNED.replace("    audit_log('wipe', path)\n", "")
+                                 .replace("        logger.error('wipe failed: %s', exc)\n", "        return False\n")
+                                 .replace("    rate_limiter.acquire()\n", ""))])
+    report.min_score = 70
+    assert report.score < 70
+    assert report.verdict == "FAIL_SCORE"
+
+
+def test_fail_critical_outranks_fail_score():
+    report = score_contexts([ctx(WIDE_OPEN)])
+    report.min_score = 70
+    assert report.verdict == "FAIL_CRITICAL"
+
+
+def test_no_floor_means_no_fail_score():
+    report = score_contexts([ctx(FULLY_GOVERNED + "auto_approve = True\n")])
+    report.min_score = None
+    assert report.verdict == "PASS"
+
+
+# --- accepted risks ---------------------------------------------------------
+
+def _risk(**kw):
+    from agentgauge.config import AcceptedRisk
+
+    base = dict(rule="human-oversight", file="mem.py", reason="reviewed by the security team")
+    base.update(kw)
+    return AcceptedRisk(**base)
+
+
+def test_accepted_risk_clears_a_critical_finding_visibly():
+    report = score_contexts([ctx(WIDE_OPEN)], accepted_risks=(_risk(function="wipe"),))
+
+    assert not any(f.rule == "human-oversight" for f in report.findings)
+    assert [a.finding.rule for a in report.accepted] == ["human-oversight"]
+    assert report.accepted[0].reason == "reviewed by the security team"
+    assert report.to_dict()["accepted_risks"][0]["reason"] == "reviewed by the security team"
+    oversight = next(c for c in report.categories if c.name == "Human oversight")
+    assert (oversight.sites, oversight.passed) == (1, 1)
+    assert report.verdict != "FAIL_CRITICAL"
+
+
+def test_accepted_risk_matches_by_path_suffix_and_call():
+    report = score_contexts(
+        [ctx(WIDE_OPEN, path="src/pkg/mem.py")],
+        accepted_risks=(_risk(file="pkg/mem.py", call="shutil.rmtree"),),
+    )
+    assert len(report.accepted) == 1
+
+
+@pytest.mark.parametrize("risk", [
+    {"function": "other"},
+    {"file": "elsewhere.py"},
+    {"call": "os.remove"},
+])
+def test_accepted_risk_that_does_not_match_changes_nothing(risk):
+    report = score_contexts([ctx(WIDE_OPEN)], accepted_risks=(_risk(**risk),))
+    assert report.accepted == []
+    assert report.verdict == "FAIL_CRITICAL"
+    assert any("matched no finding" in w for w in report.warnings)
+
+
+def test_accepted_risk_for_another_rule_leaves_the_gate_in_place():
+    report = score_contexts([ctx(WIDE_OPEN)], accepted_risks=(_risk(rule="audit-logging"),))
+    assert [a.finding.rule for a in report.accepted] == ["audit-logging"]
+    assert report.verdict == "FAIL_CRITICAL"
+
+
+def test_stale_accepted_risk_is_warned_about():
+    report = score_contexts([ctx(FULLY_GOVERNED)], accepted_risks=(_risk(function="gone"),))
+    assert any("matched no finding" in w for w in report.warnings)

@@ -1,18 +1,20 @@
 """Rule 3 of 6: Rate limiting (15 points).
 
-Heuristic: every tool function must reference rate-limiting vocabulary in
-its body or decorators: an identifier containing "ratelimit", "throttle" or
-"limiter" (underscores ignored), or the ratelimit library's @limits
-decorator. Reference-based: we confirm the vocabulary exists, not that the
-limiter is correctly configured or even called.
+Every tool entry point must reference rate-limiting vocabulary -- in its
+body, its decorators, or a function it calls: an identifier containing
+"ratelimit", "throttle" or "limiter" (underscores ignored), or the
+ratelimit library's @limits decorator. Reference-based: the rule confirms
+the vocabulary is present, not that the limiter is configured correctly.
+
+`assume_external_rate_limiting = true` marks the category not applicable
+when a gateway limits calls outside the scanned code.
 """
 
 import ast
+from collections.abc import Iterable
 
-from agentgauge.astutils import (
-    FileContext,
-    iter_identifiers,
-)
+from agentgauge.astutils import FileContext, iter_identifiers
+from agentgauge.config import RuleConfig
 from agentgauge.models import Finding
 
 RULE_ID = "rate-limiting"
@@ -24,9 +26,20 @@ WEIGHT = 15
 RATE_MARKERS = ("ratelimit", "throttle", "limiter")
 
 
-def _mentions_rate_limit(fn: ast.AST, extra_markers: tuple[str, ...]) -> bool:
-    markers = RATE_MARKERS + extra_markers
-    for ident in iter_identifiers(fn):
+def mentions_rate_limit(
+    fn: ast.AST, config: RuleConfig, scope: Iterable[ast.AST] | None = None
+) -> bool:
+    """True if `fn` references rate-limit vocabulary. With `scope` (the
+    function's own-scope nodes), nested defs are skipped -- the call-graph
+    summary covers those separately."""
+    # Config entries are collapsed the same way identifiers are, so
+    # "rate_limit" still matches "rate_limit_check".
+    markers = RATE_MARKERS + tuple(m.replace("_", "") for m in config.rate_markers)
+    idents = (
+        (ident for node in scope for ident in _node_identifiers(node))
+        if scope is not None else iter_identifiers(fn)
+    )
+    for ident in idents:
         collapsed = ident.lower().replace("_", "")
         if collapsed == "limits":  # the ratelimit library's @limits decorator
             return True
@@ -35,24 +48,30 @@ def _mentions_rate_limit(fn: ast.AST, extra_markers: tuple[str, ...]) -> bool:
     return False
 
 
+def _node_identifiers(node: ast.AST) -> list[str]:
+    if isinstance(node, ast.Name):
+        return [node.id]
+    if isinstance(node, ast.Attribute):
+        return [node.attr]
+    if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+        return [node.name]
+    if isinstance(node, ast.arg):
+        return [node.arg]
+    if isinstance(node, ast.keyword) and node.arg is not None:
+        return [node.arg]
+    return []
+
+
 def check(ctx: FileContext) -> tuple[int, int, list[Finding]]:
     if ctx.config.assume_external_rate_limiting:
-        # Infra-level limiting (API gateway, global semaphore) is out of
-        # view for a static scan; treat the category as not applicable
-        # rather than penalizing every tool function for a control that
-        # exists, just not in this source.
         return 0, 0, []
 
     sites, passed, findings = 0, 0, []
-    # Collapsed the same way _mentions_rate_limit collapses the identifiers
-    # it tests against, so an underscored config entry like "rate_limit"
-    # still matches identifiers such as "rate_limit_check".
-    extra_markers = tuple(m.replace("_", "") for m in ctx.config.rate_markers)
     for fn in ctx.functions:
         if fn not in ctx.tool_functions:
             continue
         sites += 1
-        if _mentions_rate_limit(fn, extra_markers):
+        if mentions_rate_limit(fn, ctx.config) or ctx.rate_limited_via_calls(fn):
             passed += 1
             continue
         findings.append(
@@ -60,6 +79,8 @@ def check(ctx: FileContext) -> tuple[int, int, list[Finding]]:
                 rule=RULE_ID,
                 file=ctx.path,
                 line=fn.lineno,
+                column=fn.col_offset + 1,
+                function=ctx.qualname(fn),
                 message=f"tool function '{fn.name}' has no rate-limit "
                         "or throttle reference",
                 fix="Apply a limiter, e.g. `@limiter.limit('10/minute')` or a "
