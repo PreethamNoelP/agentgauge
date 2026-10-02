@@ -461,3 +461,64 @@ def test_ignore_all_is_not_a_directive():
     )
     assert ctx.is_suppressed("permissive-defaults", 1) is False
     assert ctx.malformed_suppressions
+
+
+# --- contextual sinks: indirection, dynamic SQL, payment HTTP --------------
+
+
+def labels(src: str) -> list[str]:
+    ctx = FileContext.from_source(src)
+    return [label for _call, label in ctx.sensitive_calls]
+
+
+def test_static_getattr_resolves_to_the_named_sink():
+    assert labels("import os\ngetattr(os, 'system')(cmd)\n") == ["shell exec"]
+
+
+def test_dunder_import_resolves_to_the_named_module():
+    assert labels("__import__('subprocess').run(cmd)\n") == ["shell exec"]
+    assert labels(
+        "import importlib\nimportlib.import_module('shutil').rmtree(p)\n"
+    ) == ["file delete"]
+
+
+def test_dynamic_getattr_stays_unresolved():
+    assert labels("import os\ngetattr(os, name)(cmd)\n") == []
+
+
+def test_dynamic_sql_on_a_cursor_is_a_sink():
+    assert labels("def f(q):\n    cursor.execute(q)\n") == ["sql exec"]
+    assert labels("def f(t):\n    conn.execute(f'DELETE FROM {t}')\n") == ["sql exec"]
+    assert labels("def f(t):\n    db.executescript('DROP ' + t)\n") == ["sql exec"]
+
+
+def test_constant_sql_is_not_a_sink():
+    assert labels("cursor.execute('SELECT 1 WHERE id = ?', (x,))\n") == []
+    assert labels("Q = 'SELECT 1'\ndef f():\n    cursor.execute(Q)\n") == []
+    assert labels("session.execute(text('SELECT 1'))\n") == []
+
+
+def test_execute_on_a_non_database_receiver_is_not_a_sink():
+    assert labels("def f(task):\n    executor.execute(task)\n") == []
+
+
+def test_sql_label_is_critical():
+    assert is_critical("sql exec")
+
+
+def test_http_post_to_a_payment_api_is_a_payment_sink():
+    assert labels("requests.post('https://api.stripe.com/v1/charges', data=d)\n") == [
+        "payment"
+    ]
+    assert labels(
+        "BASE = 'https://api-m.paypal.com'\n"
+        "def pay():\n    httpx.post(f'{BASE}/v2/payments', json=d)\n"
+    ) == ["payment"]
+    assert labels("client.request('POST', url='https://api.stripe.com/v1/refunds')\n") == [
+        "payment"
+    ]
+
+
+def test_http_post_elsewhere_is_not_a_sink():
+    assert labels("requests.post('https://example.com/api', data=d)\n") == []
+    assert labels("requests.get('https://api.stripe.com/v1/charges')\n") == []

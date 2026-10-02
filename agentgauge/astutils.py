@@ -128,7 +128,30 @@ SENSITIVE_SUFFIX: dict[str, str] = {
 # catastrophic site across many low-risk ones -- see "critical-site
 # dilution" in RULES.md).
 CRITICAL_LABELS = frozenset(
-    {"file delete", "shell exec", "code exec", "payment", "remote delete"}
+    {"file delete", "shell exec", "code exec", "payment", "remote delete",
+     "sql exec"}
+)
+
+# Database-API methods that run a query string. Generic names, so they only
+# count on a receiver that looks like a DB handle *and* with a query that is
+# not a string constant: a fixed, parameterized query is not the risk; a
+# query assembled from (or equal to) model input is.
+SQL_METHODS = frozenset({"execute", "executemany", "executescript", "exec_driver_sql"})
+SQL_RECEIVER_TOKENS = frozenset({
+    "cursor", "cur", "conn", "connection", "con", "db", "database",
+    "session", "engine", "sqlite", "sqlite3", "pg", "postgres", "mysql",
+    "duckdb", "pool", "tx", "transaction",
+})
+
+# HTTP methods that create or move money when aimed at a payment API.
+HTTP_WRITE_METHODS = frozenset({"post", "put", "patch", "request", "fetch"})
+PAYMENT_HOSTS = (
+    "api.stripe.com", "api.paypal.com", "api-m.paypal.com",
+    "api-m.sandbox.paypal.com", "connect.squareup.com",
+    "api.braintreegateway.com", "checkout.adyen.com", "checkout-test.adyen.com",
+    "api.razorpay.com", "api.checkout.com", "api.mollie.com",
+    "api.paystack.co", "api.flutterwave.com", "api.wise.com",
+    "api.coinbase.com",
 )
 
 
@@ -162,6 +185,14 @@ def dotted_name(node: ast.expr, aliases: dict[str, str] | None = None) -> str | 
     while isinstance(node, ast.Attribute):
         parts.append(node.attr)
         node = node.value
+    if isinstance(node, ast.Call):
+        # getattr(os, "system"), __import__("os"), importlib.import_module("os")
+        # with constant arguments name a target exactly as statically as
+        # os.system does; only the spelling differs.
+        base_name = _static_call_target(node, aliases)
+        if base_name is None:
+            return None
+        return base_name if not parts else f"{base_name}.{'.'.join(reversed(parts))}"
     if isinstance(node, ast.Name):
         base = node.id
         if aliases and base in aliases:
@@ -172,36 +203,186 @@ def dotted_name(node: ast.expr, aliases: dict[str, str] | None = None) -> str | 
     return None
 
 
+def _const_str(node: ast.expr | None) -> str | None:
+    if isinstance(node, ast.Constant) and isinstance(node.value, str):
+        return node.value
+    return None
+
+
+def _static_call_target(
+    call: ast.Call, aliases: dict[str, str] | None
+) -> str | None:
+    """The dotted name a constant-argument getattr/__import__ call evaluates
+    to, or None for anything else."""
+    func = call.func
+    func_name = (
+        func.id if isinstance(func, ast.Name)
+        else dotted_name(func, aliases) if isinstance(func, ast.Attribute)
+        else None
+    )
+    if func_name == "getattr" and len(call.args) >= 2:
+        attr = _const_str(call.args[1])
+        obj = dotted_name(call.args[0], aliases)
+        if attr is not None and obj is not None:
+            return f"{obj}.{attr}"
+    if func_name in ("__import__", "importlib.import_module") and call.args:
+        return _const_str(call.args[0])
+    return None
+
+
 def call_name(call: ast.Call, aliases: dict[str, str] | None = None) -> str | None:
     """Dotted name of what a Call node is calling, or None if dynamic."""
     return dotted_name(call.func, aliases)
 
 
-def sensitive_label(call: ast.Call, aliases: dict[str, str] | None = None) -> str | None:
-    """Action label ("file delete", "shell exec", ...) if this call looks
-    sensitive, else None. Exact table first, then the suffix table."""
-    name = call_name(call, aliases)
-    if name is not None:
-        if name in SENSITIVE_EXACT:
-            return SENSITIVE_EXACT[name]
-        return SENSITIVE_SUFFIX.get(name.rsplit(".", 1)[-1])
-    # dotted_name gave up because the receiver is dynamic
-    # (Path(p).unlink(), clients[key].charge()). The suffix table is
-    # receiver-agnostic by construction -- the method name alone is the
-    # whole signal -- so it still applies. The exact table does not: it
-    # exists precisely to require a known module chain.
-    if isinstance(call.func, ast.Attribute):
-        return SENSITIVE_SUFFIX.get(call.func.attr)
+def word_tokens(name: str) -> set[str]:
+    """Lowercase word tokens of a name, splitting on dots, underscores and
+    camelCase: 'FunctionTool.from_defaults' -> {function, tool, from, defaults}."""
+    spaced = re.sub(r"(?<=[a-z0-9])(?=[A-Z])", "_", name)
+    return {t for t in re.split(r"[._]", spaced.lower()) if t}
+
+
+def _string_value(node: ast.expr, constants: dict[str, str]) -> str | None:
+    """The text of a string-ish expression as far as it is statically known:
+    literals, module string constants, and the literal parts of an f-string
+    or `+` concatenation -- enough to see a host name."""
+    if isinstance(node, ast.Constant) and isinstance(node.value, str):
+        return node.value
+    if isinstance(node, ast.Name):
+        return constants.get(node.id)
+    if isinstance(node, ast.JoinedStr):
+        pieces = []
+        for v in node.values:
+            if isinstance(v, ast.Constant) and isinstance(v.value, str):
+                pieces.append(v.value)
+            elif isinstance(v, ast.FormattedValue):
+                pieces.append(_string_value(v.value, constants) or "")
+        return "".join(pieces)
+    if isinstance(node, ast.BinOp) and isinstance(node.op, ast.Add):
+        return (_string_value(node.left, constants) or "") + (
+            _string_value(node.right, constants) or ""
+        )
     return None
 
 
+def _is_constant_query(node: ast.expr, constants: dict[str, str]) -> bool:
+    """True if a query argument is a fixed string: a literal, a name bound
+    only to string literals in this file, or `text("...")`/`sql.SQL("...")`
+    wrapping one. f-strings, concatenation, .format() and %-formatting are
+    the dynamic shapes that make a query injectable."""
+    if isinstance(node, ast.Constant) and isinstance(node.value, str):
+        return True
+    if isinstance(node, ast.Name):
+        return node.id in constants
+    if isinstance(node, ast.Call) and len(node.args) == 1:
+        func = node.func
+        wrapper = (
+            func.id if isinstance(func, ast.Name)
+            else func.attr if isinstance(func, ast.Attribute)
+            else None
+        )
+        if wrapper in ("text", "SQL"):
+            return _is_constant_query(node.args[0], constants)
+    return False
+
+
+def _receiver_tokens(func: ast.Attribute) -> set[str]:
+    receiver = func.value
+    while isinstance(receiver, ast.Call):
+        receiver = receiver.func
+    if not isinstance(receiver, (ast.Name, ast.Attribute)):
+        return set()
+    name = dotted_name(receiver)
+    return word_tokens(name) if name else set()
+
+
+def _contextual_label(call: ast.Call, constants: dict[str, str]) -> str | None:
+    """Sinks a name alone cannot identify: dynamic SQL on a DB handle, and
+    HTTP writes aimed at a payment API."""
+    func = call.func
+    if not isinstance(func, ast.Attribute):
+        return None
+    if func.attr in SQL_METHODS and call.args:
+        if _receiver_tokens(func) & SQL_RECEIVER_TOKENS and not _is_constant_query(
+            call.args[0], constants
+        ):
+            return "sql exec"
+    if func.attr in HTTP_WRITE_METHODS:
+        url_args = list(call.args[:2]) + [
+            kw.value for kw in call.keywords if kw.arg in ("url", "endpoint")
+        ]
+        for arg in url_args:
+            text = _string_value(arg, constants)
+            if text and any(host in text for host in PAYMENT_HOSTS):
+                return "payment"
+    return None
+
+
+def sensitive_label(
+    call: ast.Call,
+    aliases: dict[str, str] | None = None,
+    constants: dict[str, str] | None = None,
+) -> str | None:
+    """Action label ("file delete", "shell exec", ...) if this call looks
+    sensitive, else None. Exact table first, then the suffix table, then the
+    contextual checks (dynamic SQL, payment HTTP) that read the arguments.
+
+    `constants` maps names bound only to string literals to their value
+    (see build_string_constants)."""
+    name = call_name(call, aliases)
+    label: str | None = None
+    if name is not None:
+        label = SENSITIVE_EXACT.get(name) or SENSITIVE_SUFFIX.get(
+            name.rsplit(".", 1)[-1]
+        )
+    elif isinstance(call.func, ast.Attribute):
+        # The receiver is dynamic (Path(p).unlink(), clients[key].charge()).
+        # The suffix table is receiver-agnostic by construction, so it still
+        # applies; the exact table requires a known module chain.
+        label = SENSITIVE_SUFFIX.get(call.func.attr)
+    if label is None:
+        label = _contextual_label(call, constants or {})
+    return label
+
+
+def build_string_constants(tree: ast.AST) -> dict[str, str]:
+    """Names bound only to string literals anywhere in the file (`QUERY =
+    "SELECT ..."`, `STRIPE_URL = "https://api.stripe.com/v1"`). A name that
+    is ever bound to anything else is left out: its value is not known."""
+    values: dict[str, str] = {}
+    poisoned: set[str] = set()
+    for node in ast.walk(tree):
+        targets: list[ast.expr] = []
+        value: ast.expr | None = None
+        if isinstance(node, ast.Assign):
+            targets, value = list(node.targets), node.value
+        elif isinstance(node, ast.AnnAssign) and node.value is not None:
+            targets, value = [node.target], node.value
+        elif isinstance(node, (ast.AugAssign, ast.NamedExpr)):
+            targets = [node.target]
+        elif isinstance(node, (ast.For, ast.AsyncFor, ast.comprehension)):
+            targets = [node.target]
+        elif isinstance(node, ast.arg):
+            poisoned.add(node.arg)
+        for target in targets:
+            if not isinstance(target, ast.Name):
+                continue
+            if isinstance(value, ast.Constant) and isinstance(value.value, str):
+                values.setdefault(target.id, value.value)
+            else:
+                poisoned.add(target.id)
+    return {k: v for k, v in values.items() if k not in poisoned}
+
+
 def iter_sensitive_calls(
-    tree: ast.AST, aliases: dict[str, str] | None = None
+    tree: ast.AST,
+    aliases: dict[str, str] | None = None,
+    constants: dict[str, str] | None = None,
 ) -> Iterator[tuple[ast.Call, str]]:
     """Yield (call_node, action_label) for every sensitive call in the tree."""
     for node in ast.walk(tree):
         if isinstance(node, ast.Call):
-            label = sensitive_label(node, aliases)
+            label = sensitive_label(node, aliases, constants)
             if label is not None:
                 yield node, label
 
@@ -441,13 +622,19 @@ class FileContext:
         return self._defs_and_calls[0]
 
     @cached_property
+    def string_constants(self) -> dict[str, str]:
+        """Names bound only to string literals (see build_string_constants)."""
+        return build_string_constants(self.tree)
+
+    @cached_property
     def sensitive_calls(self) -> list[tuple[ast.Call, str]]:
         """Every (call, action label) pair in the file, alias-resolved."""
         aliases = self.import_aliases
+        constants = self.string_constants
         return [
             (call, label)
             for call in self._defs_and_calls[1]
-            if (label := sensitive_label(call, aliases)) is not None
+            if (label := sensitive_label(call, aliases, constants)) is not None
         ]
 
     @cached_property
