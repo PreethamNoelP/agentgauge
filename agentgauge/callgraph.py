@@ -89,6 +89,7 @@ Ref = tuple[str, str, str]
 @dataclass
 class Edge:
     ref: Ref
+    site: tuple[int, int]  # (lineno, col_offset) of the call
     gated: bool         # dominated by approval, caller params allowed
     gated_strict: bool  # dominated by approval, caller params excluded
     handled: bool = False  # inside a try body whose handler deals with failure
@@ -132,6 +133,10 @@ def _module_aliases(
             for alias in node.names:
                 if alias.asname is not None:
                     aliases[alias.asname] = alias.name
+                else:
+                    # `import ops` binds ops; `import a.b` binds a.
+                    root = alias.name.split(".", 1)[0]
+                    aliases.setdefault(root, root)
         elif isinstance(node, ast.ImportFrom):
             if node.level:
                 base_parts = package.split(".") if package else []
@@ -227,7 +232,7 @@ def summarize(ctx: "FileContext", module: str, is_package: bool = False) -> File
     decorators = config.tool_decorators
     analyzer = ctx.approval
     sink_scopes = {
-        id(ctx.enclosing_scope(call)) for call, _label in ctx.sensitive_calls
+        id(ctx.enclosing_scope(call)) for call, _label in ctx.candidate_sensitive_calls
     }
 
     functions: dict[Key, FuncInfo] = {}
@@ -287,7 +292,10 @@ def summarize(ctx: "FileContext", module: str, is_package: bool = False) -> File
                         gated = analyzer.is_dominated(node, stmt, exclude_params=False)
                         strict = analyzer.is_dominated(node, stmt, exclude_params=True)
                         handled = protection(node, ctx.parents) == "handled"
-                        info.edges.extend(Edge(r, gated, strict, handled) for r in refs)
+                        site = (node.lineno, node.col_offset)
+                        info.edges.extend(
+                            Edge(r, site, gated, strict, handled) for r in refs
+                        )
                     registrations.extend(_registration_refs(node, aliases))
                 visit(_direct_defs(stmt), f"{prefix}{stmt.name}.", None, False, key)
 
@@ -366,6 +374,8 @@ class ProgramIndex:
     reachable: set[Key]
     gated: set[Key]
     protected: set[Key]
+    # (path, lineno, col) of calls that resolved to a scanned function.
+    resolved_sites: set[tuple[str, int, int]]
     logs_closure: set[Key]
     rate_closure: set[Key]
     qualnames: dict[Key, str]
@@ -446,12 +456,21 @@ class ProgramIndex:
         callees: dict[Key, set[Key]] = {k: set() for k in funcs}
         callers: dict[Key, list[tuple[Key, Edge]]] = {k: [] for k in funcs}
         children: dict[Key, set[Key]] = {k: set() for k in funcs}
+        resolved_sites: set[tuple[str, int, int]] = set()
         for key, info in funcs.items():
             if info.parent is not None:
                 children[info.parent].add(key)
             summary = file_of[key]
             for edge in info.edges:
-                for target in resolve(edge.ref, summary, info):
+                targets = resolve(edge.ref, summary, info)
+                # Only an exact resolution means "this call runs that code";
+                # a same-named method on an unknown receiver may be anything.
+                if targets and edge.ref[0] in ("name", "dotted", "method") and (
+                    edge.ref[0] != "method" or edge.ref[1] in summary.classes
+                    or edge.ref[1] in ("self", "cls")
+                ):
+                    resolved_sites.add((summary.path, *edge.site))
+                for target in targets:
                     if target == key:
                         continue
                     callees[key].add(target)
@@ -515,6 +534,7 @@ class ProgramIndex:
             reachable=reachable,
             gated=gated,
             protected=protected,
+            resolved_sites=resolved_sites,
             logs_closure=logs_closure,
             rate_closure=rate_closure,
             qualnames={k: info.qualname for k, info in funcs.items()},

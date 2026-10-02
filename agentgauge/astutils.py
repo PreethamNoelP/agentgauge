@@ -701,8 +701,9 @@ class FileContext:
         return build_string_constants(self.tree, self.all_nodes)
 
     @cached_property
-    def sensitive_calls(self) -> list[tuple[ast.Call, str]]:
-        """Every (call, action label) pair in the file, alias-resolved."""
+    def candidate_sensitive_calls(self) -> list[tuple[ast.Call, str]]:
+        """Every call whose name or arguments look sensitive, alias-resolved,
+        before cross-file resolution (see sensitive_calls)."""
         aliases = self.import_aliases
         constants = self.string_constants
         return [
@@ -712,8 +713,23 @@ class FileContext:
         ]
 
     @cached_property
+    def sensitive_calls(self) -> list[tuple[ast.Call, str]]:
+        """The sensitive calls the rules judge. A call that resolves to a
+        function in the scanned code -- `ops.remove_file(path)` where ops.py
+        defines remove_file -- is not itself a sink: the sinks inside that
+        function are judged where they are, and reporting the call site as
+        well would count the same risk twice."""
+        resolved = self.index.resolved_sites
+        if not resolved:
+            return self.candidate_sensitive_calls
+        return [
+            (call, label) for call, label in self.candidate_sensitive_calls
+            if (self.path, call.lineno, call.col_offset) not in resolved
+        ]
+
+    @cached_property
     def sensitive_call_ids(self) -> frozenset[int]:
-        return frozenset(id(call) for call, _label in self.sensitive_calls)
+        return frozenset(id(call) for call, _label in self.candidate_sensitive_calls)
 
     def is_sensitive(self, call: ast.Call) -> bool:
         return id(call) in self.sensitive_call_ids

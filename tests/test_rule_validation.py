@@ -276,6 +276,13 @@ def test_validated_local_from_arguments_dict_passes():
     assert run(src)[:2] == (1, 1)
 
 
+def test_an_approval_check_is_not_input_validation():
+    sites, passed, _ = run(tool(
+        "if not request_approval('delete', path):\n    return\nos.remove(path)"
+    ))
+    assert (sites, passed) == (1, 0)
+
+
 def test_validation_of_a_derived_value_counts():
     src = tool(
         "argv = shlex.split(command)\n"

@@ -44,6 +44,7 @@ from agentgauge.astutils import (
     name_tokens,
     word_tokens,
 )
+from agentgauge.approval import is_approval_name
 from agentgauge.models import Finding
 
 RULE_ID = "input-validation"
@@ -121,6 +122,11 @@ def _tested_names(test: ast.expr) -> set[str]:
         name = call_name(test)
         if name in _NON_VALIDATING_CALLS:
             return set()
+        # Asking a human about a value is approval, not input validation.
+        if name is not None and is_approval_name(name):
+            return set()
+    if isinstance(test, ast.Await):
+        return _tested_names(test.value)
     return _names_in(test)
 
 

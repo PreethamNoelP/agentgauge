@@ -252,4 +252,28 @@ def test_gating_in_another_file_covers_the_helper(tmp_path, monkeypatch):
         "    if not request_approval(path):\n        return\n    fs.remove_tree(path)\n"
     )
     report = scan(tmp_path, Config(min_score=0))
+    assert report.out_of_scope_sensitive_calls == 0  # the helper was reached
     assert not any(f.rule == "human-oversight" for f in report.findings)
+
+
+def test_plain_module_import_resolves_and_the_call_site_is_not_a_second_sink(tmp_path, monkeypatch):
+    # `ops.remove_file(path)` matches the suffix table by name, but it
+    # resolves to scanned code: the real sink is os.remove inside it, and
+    # that is the one place the risk is reported.
+    monkeypatch.chdir(tmp_path)
+    (tmp_path / "ops.py").write_text("import os\ndef remove_file(p):\n    os.remove(p)\n")
+    (tmp_path / "server.py").write_text(
+        "import ops\n@mcp.tool()\ndef clear(path):\n    ops.remove_file(path)\n"
+    )
+    report = scan(tmp_path, Config(min_score=0))
+    oversight = [(f.file, f.line) for f in report.findings if f.rule == "human-oversight"]
+    assert oversight == [("ops.py", 3)]
+
+
+def test_unresolved_suffix_sink_is_still_a_sink(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    (tmp_path / "server.py").write_text(
+        "@mcp.tool()\ndef clear(file_id):\n    storage_client.delete_file(file_id)\n"
+    )
+    report = scan(tmp_path, Config(min_score=0))
+    assert any(f.rule == "human-oversight" and f.critical for f in report.findings)
