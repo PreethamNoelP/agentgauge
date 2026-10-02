@@ -277,3 +277,22 @@ def test_unresolved_suffix_sink_is_still_a_sink(tmp_path, monkeypatch):
     )
     report = scan(tmp_path, Config(min_score=0))
     assert any(f.rule == "human-oversight" and f.critical for f in report.findings)
+
+
+def test_definitions_under_if_and_try_blocks_are_seen():
+    src = (
+        "import os\n"
+        "try:\n"
+        "    @tool\n"
+        "    def a(p):\n"
+        "        os.remove(p)\n"
+        "except ImportError:\n"
+        "    pass\n"
+        "class K:\n"
+        "    if True:\n"
+        "        @tool\n"
+        "        def b(self, p):\n"
+        "            os.remove(p)\n"
+    )
+    assert tools(src) == {"a", "K.b"}
+

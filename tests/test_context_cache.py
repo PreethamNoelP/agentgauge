@@ -73,3 +73,24 @@ def test_cached_views_are_computed_once():
     assert ctx.parents is ctx.parents
     assert ctx.functions is ctx.functions
     assert ctx.index is ctx.index
+
+
+@pytest.mark.parametrize("src", list(_sources()))
+def test_direct_defs_match_a_bounded_walk(src):
+    ctx = FileContext.from_source(src, path="mem.py")
+    definers = (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)
+
+    def bounded(container):
+        found, queue = [], list(ast.iter_child_nodes(container))
+        while queue:
+            node = queue.pop()
+            if isinstance(node, definers):
+                found.append(node)
+                continue
+            queue.extend(ast.iter_child_nodes(node))
+        return {id(n) for n in found}
+
+    containers = [ctx.tree] + [n for n in ctx.all_nodes if isinstance(n, definers)]
+    for container in containers:
+        assert {id(n) for n in ctx.direct_defs(container)} == bounded(container)
+

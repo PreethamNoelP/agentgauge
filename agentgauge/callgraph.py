@@ -248,7 +248,10 @@ def summarize(ctx: "FileContext", module: str, is_package: bool = False) -> File
                 bases = [dotted_name(b, aliases) or "" for b in stmt.bases]
                 is_tool_class = any("tool" in word_tokens(b) for b in bases)
                 classes.setdefault(stmt.name, {})
-                visit(stmt.body, f"{prefix}{stmt.name}.", stmt.name, is_tool_class, parent)
+                visit(
+                    ctx.direct_defs(stmt), f"{prefix}{stmt.name}.", stmt.name,
+                    is_tool_class, parent,
+                )
             elif isinstance(stmt, (ast.FunctionDef, ast.AsyncFunctionDef)):
                 key = key_of(ctx.path, stmt)
                 entry = not _is_stub(stmt, aliases) and (
@@ -297,9 +300,9 @@ def summarize(ctx: "FileContext", module: str, is_package: bool = False) -> File
                             Edge(r, site, gated, strict, handled) for r in refs
                         )
                     registrations.extend(_registration_refs(node, aliases))
-                visit(_direct_defs(stmt), f"{prefix}{stmt.name}.", None, False, key)
+                visit(ctx.direct_defs(stmt), f"{prefix}{stmt.name}.", None, False, key)
 
-    visit(tree.body if isinstance(tree, ast.Module) else [], "", None, False, None)
+    visit(ctx.direct_defs(tree), "", None, False, None)
 
     # Module-level and class-level registrations and tool tables.
     for node in ctx.scope_nodes(tree):
@@ -347,19 +350,6 @@ def _is_stub(fn: FunctionNode, aliases: dict[str, str]) -> bool:
             exc = stmt.exc.func if isinstance(stmt.exc, ast.Call) else stmt.exc
             return dotted_name(exc) == "NotImplementedError"
     return False
-
-
-def _direct_defs(fn: ast.AST) -> list[ast.stmt]:
-    """Defs and classes in `fn`'s own scope, without descending into them."""
-    found: list[ast.stmt] = []
-    queue = list(ast.iter_child_nodes(fn))
-    while queue:
-        node = queue.pop()
-        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
-            found.append(node)
-            continue
-        queue.extend(ast.iter_child_nodes(node))
-    return sorted(found, key=lambda n: (n.lineno, n.col_offset))
 
 
 # -- whole-program index ----------------------------------------------------

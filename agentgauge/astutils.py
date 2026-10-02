@@ -611,6 +611,7 @@ class FileContext:
     program: "ProgramIndex | None" = None
     _parent_map: dict[ast.AST, ast.AST] = field(default_factory=dict, repr=False)
     _scope_buckets: dict[int, list[ast.AST]] = field(default_factory=dict, repr=False)
+    _direct_defs: dict[int, list[ast.stmt]] = field(default_factory=dict, repr=False)
 
     @classmethod
     def from_source(
@@ -643,9 +644,14 @@ class FileContext:
         nodes: list[ast.AST] = []
         parents: dict[ast.AST, ast.AST] = {}
         buckets: dict[int, list[ast.AST]] = {}
-        queue: deque[tuple[ast.AST, ast.AST]] = deque([(self.tree, self.tree)])
+        defs: dict[int, list[ast.stmt]] = {}
+        definers = (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)
+        # (node, enclosing function scope, nearest enclosing def-or-class)
+        queue: deque[tuple[ast.AST, ast.AST, ast.AST]] = deque(
+            [(self.tree, self.tree, self.tree)]
+        )
         while queue:
-            node, scope = queue.popleft()
+            node, scope, container = queue.popleft()
             nodes.append(node)
             buckets.setdefault(id(scope), []).append(node)
             for child in ast.iter_child_nodes(node):
@@ -654,10 +660,24 @@ class FileContext:
                     child if isinstance(child, (ast.FunctionDef, ast.AsyncFunctionDef))
                     else scope
                 )
-                queue.append((child, child_scope))
+                if isinstance(child, definers):
+                    defs.setdefault(id(container), []).append(child)
+                    child_container: ast.AST = child
+                else:
+                    child_container = container
+                queue.append((child, child_scope, child_container))
         self._parent_map = parents
         self._scope_buckets = buckets
+        self._direct_defs = defs
         return nodes
+
+    def direct_defs(self, container: ast.AST) -> list[ast.stmt]:
+        """Functions and classes defined directly inside `container` (the
+        module, a class or a function), however deeply nested in if/try/with
+        blocks, without descending into other definitions. Source order."""
+        self.all_nodes  # noqa: B018 -- builds the index as a side effect
+        found = self._direct_defs.get(id(container), [])
+        return sorted(found, key=lambda n: (n.lineno, n.col_offset))
 
     def scope_nodes(self, scope: ast.AST) -> list[ast.AST]:
         """The same nodes iter_scope(scope) yields, precomputed: `scope`
