@@ -33,7 +33,8 @@ DANGEROUS_WHEN_FALSE = frozenset({
     "requireconfirmation", "confirmationrequired", "requireconfirm",
     "requireauth", "authrequired",
     "requirehuman", "humanintheloop", "humanreview",
-    "verify", "verifyssl", "sslverify",
+    "verify", "verifyssl", "sslverify", "verifysslcerts", "verifycerts",
+    "verifycertificate", "checkhostname", "validatecerts",
     "safemode", "sandbox", "sandboxed",
 })
 

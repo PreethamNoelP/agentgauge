@@ -1,3 +1,4 @@
+import pytest
 from agentgauge.astutils import FileContext
 from agentgauge.config import RuleConfig
 from agentgauge.rules import defaults
@@ -96,3 +97,10 @@ def test_nested_dict_flag_is_still_found():
         'CONFIG = {"tools": {"shell": {"skip_confirmation": True}}}\n'
     )
     assert (sites, passed) == (1, 0)
+
+
+@pytest.mark.parametrize("flag", ["verify_ssl_certs", "check_hostname", "validate_certs"])
+def test_tls_verification_flags_set_false_are_permissive(flag):
+    sites, passed, _ = run(f"client = make({flag}=False)\n")
+    assert (sites, passed) == (1, 0)
+

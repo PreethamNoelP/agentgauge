@@ -25,6 +25,10 @@ Validation evidence, any of:
 Ordering: when the input reaches a sensitive call, the validation must
 start before that call (a sanitizer wrapping the argument, such as
 `run(shlex.quote(cmd))`, counts).
+
+One assignment hop is followed: with `argv = shlex.split(command)`, an
+allowlist check on `argv[0]` validates `command`, provided `command` itself
+never reaches a sink unvalidated.
 """
 
 import ast
@@ -170,13 +174,45 @@ def _first_raw_use(
     return first
 
 
-def _is_validated(
+def _validated_directly(
     name: str, evidence: list[_Evidence], first_use: dict[str, tuple[int, int]]
 ) -> bool:
     limit = first_use.get(name)
     return any(
         name in e.names and (limit is None or (e.line, e.col) < limit)
         for e in evidence
+    )
+
+
+def _derived_names(fn: FunctionNode, ctx: FileContext) -> dict[str, set[str]]:
+    """name -> the names its assigned value was computed from, for simple
+    `x = <expr>` assignments in the function's own scope."""
+    derived: dict[str, set[str]] = {}
+    for node in ctx.scope_nodes(fn):
+        if (
+            isinstance(node, ast.Assign)
+            and len(node.targets) == 1
+            and isinstance(node.targets[0], ast.Name)
+        ):
+            derived.setdefault(node.targets[0].id, set()).update(_names_in(node.value))
+    return derived
+
+
+def _is_validated(
+    name: str,
+    evidence: list[_Evidence],
+    first_use: dict[str, tuple[int, int]],
+    derived: dict[str, set[str]] | None = None,
+) -> bool:
+    if _validated_directly(name, evidence, first_use):
+        return True
+    if derived is None or name in first_use:
+        # Used raw in a sink: only validation of the value itself counts.
+        return False
+    return any(
+        name in sources and _validated_directly(alias, evidence, first_use)
+        for alias, sources in derived.items()
+        if alias != name
     )
 
 
@@ -378,12 +414,13 @@ def check(ctx: FileContext) -> tuple[int, int, list[Finding]]:
             continue
         evidence = _evidence(fn, ctx, tokens)
         first_use = _first_raw_use(fn, ctx, tokens)
+        derived = _derived_names(fn, ctx)
 
         for arg in _params(fn):
             if _is_risky(arg.arg, risky):
                 sites += 1
                 if _annotation_is_constrained(arg.annotation, classes) or _is_validated(
-                    arg.arg, evidence, first_use
+                    arg.arg, evidence, first_use, derived
                 ):
                     passed += 1
                 else:
@@ -410,7 +447,7 @@ def check(ctx: FileContext) -> tuple[int, int, list[Finding]]:
         for key, line, col, local, node in _argument_reads(fn, risky, ctx):
             sites += 1
             ok = (
-                _is_validated(local, evidence, first_use) if local is not None
+                _is_validated(local, evidence, first_use, derived) if local is not None
                 else _inside_validation(node, fn, ctx, tokens)
             )
             if ok:

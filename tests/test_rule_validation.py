@@ -274,3 +274,24 @@ def test_validated_local_from_arguments_dict_passes():
         "    os.remove(path)\n"
     )
     assert run(src)[:2] == (1, 1)
+
+
+def test_validation_of_a_derived_value_counts():
+    src = tool(
+        "argv = shlex.split(command)\n"
+        "if not argv or argv[0] not in ALLOWED:\n    raise ValueError\n"
+        "subprocess.run(argv)",
+        "command",
+    )
+    assert run(src)[:2] == (1, 1)
+
+
+def test_derived_validation_does_not_cover_raw_use_of_the_input():
+    src = tool(
+        "argv = shlex.split(command)\n"
+        "if argv[0] not in ALLOWED:\n    raise ValueError\n"
+        "subprocess.run(command, shell=True)",
+        "command",
+    )
+    assert run(src)[:2] == (1, 0)
+
