@@ -9,7 +9,7 @@ can't judge a value we can't see.
 """
 
 import ast
-from typing import Iterator
+from collections.abc import Iterable, Iterator
 
 from agentgauge.astutils import FileContext
 from agentgauge.models import Finding
@@ -33,7 +33,8 @@ DANGEROUS_WHEN_FALSE = frozenset({
     "requireconfirmation", "confirmationrequired", "requireconfirm",
     "requireauth", "authrequired",
     "requirehuman", "humanintheloop", "humanreview",
-    "verify", "verifyssl", "sslverify",
+    "verify", "verifyssl", "sslverify", "verifysslcerts", "verifycerts",
+    "verifycertificate", "checkhostname", "validatecerts",
     "safemode", "sandbox", "sandboxed",
 })
 
@@ -54,11 +55,11 @@ def collapse_flag_name(name: str) -> str:
 _collapsed = collapse_flag_name
 
 
-def _flag_bindings(tree: ast.AST) -> Iterator[tuple[str, ast.expr, int]]:
+def _flag_bindings(nodes: Iterable[ast.AST]) -> Iterator[tuple[str, ast.expr, int]]:
     """Yield (name, value_node, lineno) for every name-to-value binding:
     assignments, keyword arguments, parameter defaults, and dict entries
     with a literal string key."""
-    for node in ast.walk(tree):
+    for node in nodes:
         if isinstance(node, ast.Assign):
             for target in node.targets:
                 if isinstance(target, ast.Name):
@@ -109,7 +110,7 @@ def check(ctx: FileContext) -> tuple[int, int, list[Finding]]:
     dangerous_when_false = DANGEROUS_WHEN_FALSE | {
         _collapsed(n) for n in ctx.config.dangerous_when_false
     }
-    for name, value, lineno in _flag_bindings(ctx.tree):
+    for name, value, lineno in _flag_bindings(ctx.all_nodes):
         if not (isinstance(value, ast.Constant) and isinstance(value.value, bool)):
             continue
         collapsed = _collapsed(name)

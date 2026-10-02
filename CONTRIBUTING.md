@@ -63,13 +63,21 @@ Then:
 3. Rebalance `WEIGHT`s so they still total 100 — also checked by
    `test_rules_package.py`. Changing weights changes every user's score,
    so say so in `CHANGELOG.md`.
-4. Ask the context for what you need (`ctx.functions`,
-   `ctx.sensitive_calls`, `ctx.tool_functions`, `ctx.parents`) instead of
-   walking the tree yourself where a cached view exists — six rules each
-   doing their own walks is where scan time goes.
-5. Add tests: `tests/test_rule_<name>.py`, plus a case in
+4. Ask the context for what you need instead of walking the tree
+   yourself: `ctx.all_nodes`, `ctx.scope_nodes(fn)`, `ctx.functions`,
+   `ctx.sensitive_calls`, `ctx.tool_functions` (entry points),
+   `ctx.in_scope(fn)` (agent-reachable), `ctx.is_entry(fn)`,
+   `ctx.is_gated(fn)`, `ctx.approval` and `ctx.parents` are all built from
+   one shared walk. A rule that walks the tree again is a rule that makes
+   every scan slower.
+5. Judge only reachable code: skip sites where `not ctx.in_scope(fn)`,
+   unless the rule is about deployment settings (as permissive defaults
+   is). Fill `column` and `function` (`ctx.qualname(fn)`) on every finding.
+6. Add tests: `tests/test_rule_<name>.py`, plus a case in
    `tests/fixtures/vulnerable_server.py` (must fire) and, if the rule can
-   pass, `tests/fixtures/clean_server.py` (must not fire).
+   pass, `tests/fixtures/clean_server.py` (must not fire). If reviewers can
+   judge the rule independently of its own definition, add it to
+   `MEASURED_RULES` in `benchmarks/run.py` and label the corpus.
 
 Invariants your rule must keep, because scoring relies on them:
 
@@ -95,10 +103,28 @@ positive is implausible (`rmtree`, `delete_bucket`, `transfer_funds` — not
 someone's build for no reason, which costs more trust than a missed
 finding does.
 
+## The benchmark
+
+`python benchmarks/run.py` must pass. It fails whenever agentgauge's output
+differs from the corpus labels, in either direction, so:
+
+- **A detection change** that adds or removes findings needs the matching
+  label change in the same commit: `expect` for a real issue now caught,
+  remove a `known-fp` that is now fixed, turn a `known-miss` into `expect`.
+- **Labels state what a reviewer would conclude**, never what agentgauge
+  currently does. If the tool is wrong, the label is `known-fp` or
+  `known-miss` and the case stays in the numbers.
+- **A reported false positive or negative** is best turned into a corpus
+  case (or a `known_limits.py` entry) as well as a unit test.
+
+See [benchmarks/README.md](benchmarks/README.md).
+
 ## Pull requests
 
 - Branch from `main`, one logical change per commit.
-- `python -m pytest tests/ -q` green, and CI green on every matrix entry —
+- `python -m pytest tests/ -q`, `mypy`, `ruff check agentgauge/ tests/
+  benchmarks/` and `python benchmarks/run.py` green, and CI green on every
+  matrix entry —
   including Windows, where path handling and glob case sensitivity have
   broken before.
 - Update `CHANGELOG.md` under `Unreleased`.

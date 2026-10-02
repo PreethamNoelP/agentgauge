@@ -36,7 +36,7 @@ def test_dangerous_true_flag_set_false_passes(tmp_path):
 
 
 def test_dangerous_when_false_flag_fails(tmp_path):
-    sites, passed, findings, skip = run(
+    sites, passed, findings, _skip = run(
         tmp_path, "mcp.json", '{"requireApproval": false}\n'
     )
     assert (sites, passed) == (1, 0)
@@ -69,7 +69,7 @@ def test_array_valued_flag_is_not_a_site(tmp_path):
 
 
 def test_nested_object_flag_is_still_found(tmp_path):
-    sites, passed, findings, skip = run(
+    sites, passed, _findings, _skip = run(
         tmp_path,
         "claude_desktop_config.json",
         json.dumps(
@@ -87,13 +87,13 @@ def test_malformed_json_is_skipped_with_a_reason(tmp_path):
 
 def test_line_number_points_at_the_flag(tmp_path):
     content = '{\n  "servers": {},\n  "autoApprove": true\n}\n'
-    sites, passed, findings, skip = run(tmp_path, "mcp.json", content)
+    _sites, _passed, findings, _skip = run(tmp_path, "mcp.json", content)
     assert findings[0].line == 3
 
 
 def test_extra_config_filenames_config_is_recognized(tmp_path):
     config = RuleConfig(dangerous_when_true=frozenset({"yolo_mode"}))
-    sites, passed, findings, skip = run(
+    sites, passed, findings, _skip = run(
         tmp_path, "mcp.json", '{"yolo_mode": true}\n', config=config
     )
     assert (sites, passed) == (1, 0)

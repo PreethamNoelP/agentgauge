@@ -1,9 +1,17 @@
+import dataclasses
+
+import pytest
+
 from agentgauge.astutils import FileContext
 from agentgauge.config import RuleConfig
 from agentgauge.rules import validation
 
 
-def run(src: str, config: RuleConfig | None = None):
+def run(src: str, config: RuleConfig | None = None, scope: str = "all"):
+    """Rule mechanics are tested in scope "all" (every function with a sink
+    is a tool), so a snippet needs no tool decorator to be judged. Tool-
+    scope behavior has its own tests below and in test_callgraph.py."""
+    config = dataclasses.replace(config or RuleConfig(), scope=scope)
     return validation.check(FileContext.from_source(src, path="mem.py", config=config))
 
 
@@ -93,7 +101,7 @@ def test_annotated_field_counts_as_validation():
 def test_annotated_without_field_does_not_count_as_validation():
     # Annotated[T, ...] alone carries no declared constraint -- only a
     # Field(...) call in the metadata is evidence.
-    sites, passed, findings = run(
+    sites, passed, _findings = run(
         "from typing import Annotated\n"
         "@mcp.tool()\n"
         "def query(query: Annotated[str, 'some docstring metadata']):\n"
@@ -103,7 +111,7 @@ def test_annotated_without_field_does_not_count_as_validation():
 
 
 def test_plain_str_annotation_does_not_count_as_validation():
-    sites, passed, findings = run(
+    sites, passed, _findings = run(
         "@mcp.tool()\n"
         "def read(path: str):\n"
         "    return open(path).read()\n"
@@ -113,7 +121,7 @@ def test_plain_str_annotation_does_not_count_as_validation():
 
 def test_extra_risky_param_from_config_is_a_site():
     config = RuleConfig(risky_param_tokens=frozenset({"apikey"}))
-    sites, passed, findings = run(
+    sites, passed, _findings = run(
         "@mcp.tool()\ndef configure(apikey):\n    store(apikey)\n",
         config=config,
     )
@@ -138,3 +146,160 @@ def test_aliased_validator_still_counts():
     )
     assert (sites, passed) == (1, 1)
     assert findings == []
+
+
+# --- evidence must be real validation, before use --------------------------
+
+def tool(body: str, params: str = "path") -> str:
+    return "@mcp.tool()\n" f"def t({params}):\n" + "".join(
+        f"    {line}\n" for line in body.splitlines()
+    )
+
+
+def test_truthiness_is_not_validation():
+    sites, passed, _ = run(tool("if not path:\n    return\nos.remove(path)"))
+    assert (sites, passed) == (1, 0)
+
+
+def test_none_check_is_not_validation():
+    sites, passed, _ = run(tool("if path is None:\n    return\nos.remove(path)"))
+    assert (sites, passed) == (1, 0)
+
+
+def test_isinstance_is_not_validation():
+    sites, passed, _ = run(tool("assert isinstance(path, str)\nos.remove(path)"))
+    assert (sites, passed) == (1, 0)
+
+
+def test_membership_and_comparison_are_validation():
+    assert run(tool("if path not in ALLOWED:\n    raise ValueError\nos.remove(path)"))[:2] == (1, 1)
+    assert run(tool("if not Path(path).resolve().is_relative_to(ROOT):\n    raise ValueError\nos.remove(path)"))[:2] == (1, 1)
+
+
+def test_a_sink_named_like_a_validator_validates_nothing():
+    sites, passed, _ = run(tool("return subprocess.check_output(cmd, shell=True)", "cmd"))
+    assert (sites, passed) == (1, 0)
+
+
+def test_validation_after_the_sink_does_not_count():
+    sites, passed, _ = run(tool("os.remove(path)\nvalidate_path(path)"))
+    assert (sites, passed) == (1, 0)
+
+
+def test_sanitizer_wrapping_the_sink_argument_counts():
+    sites, passed, _ = run(tool("subprocess.run(shlex.quote(cmd), shell=True)", "cmd"))
+    assert (sites, passed) == (1, 1)
+
+
+def test_safe_and_ensure_helpers_count():
+    assert run(tool("p = safe_join(ROOT, path)\nos.remove(p)"))[:2] == (1, 1)
+    assert run(tool("ensure_within_root(path)\nos.remove(path)"))[:2] == (1, 1)
+
+
+def test_camel_case_risky_parameters_are_seen():
+    sites, _, findings = run(tool("os.remove(filePath)", "filePath"))
+    assert sites == 1
+    assert "filePath" in findings[0].message
+
+
+def test_enum_annotation_counts_as_validation():
+    src = "class Mode(Enum):\n    A = 'a'\n" + tool("os.remove(target)", "target: Mode")
+    assert run(src)[:2] == (1, 1)
+
+
+def test_annotated_field_without_a_constraint_does_not_count():
+    sites, passed, _ = run(tool("os.remove(path)", "path: Annotated[str, Field(description='p')]"))
+    assert (sites, passed) == (1, 0)
+
+
+def test_annotated_validator_counts():
+    assert run(tool("os.remove(path)", "path: Annotated[str, AfterValidator(check)]"))[:2] == (1, 1)
+
+
+def test_framework_context_parameter_is_not_an_input():
+    sites, _, _ = run(tool("return 1", "ctx: Context, run_context: RunContextWrapper, context=None"))
+    assert sites == 0
+
+
+# --- input models ------------------------------------------------------------
+
+def test_unvalidated_model_field_is_a_site():
+    src = "class Req(BaseModel):\n    path: str\n    note: str\n" + tool("os.remove(req.path)", "req: Req")
+    sites, passed, findings = run(src)
+    assert (sites, passed) == (1, 0)
+    assert "input model 'Req'" in findings[0].message
+
+
+@pytest.mark.parametrize("field", [
+    "path: str = Field(pattern=r'^/data/')",
+    "path: Annotated[str, Field(max_length=64)]",
+    "path: Literal['a', 'b']",
+])
+def test_constrained_model_field_passes(field):
+    src = f"class Req(BaseModel):\n    {field}\n" + tool("os.remove(req.path)", "req: Req")
+    assert run(src)[:2] == (1, 1)
+
+
+def test_field_validator_covers_its_field():
+    src = (
+        "class Req(BaseModel):\n    path: str\n    url: str\n"
+        "    @field_validator('path')\n    def _p(cls, v):\n        return v\n"
+    ) + tool("os.remove(req.path)", "req: Req")
+    sites, passed, findings = run(src)
+    assert (sites, passed) == (2, 1)
+    assert "'url'" in findings[0].message
+
+
+def test_model_validator_covers_every_field():
+    src = (
+        "class Req(BaseModel):\n    path: str\n    url: str\n"
+        "    @model_validator(mode='after')\n    def _v(self):\n        return self\n"
+    ) + tool("os.remove(req.path)", "req: Req")
+    assert run(src)[:2] == (2, 2)
+
+
+# --- low-level arguments dicts -------------------------------------------------
+
+def test_risky_key_from_arguments_dict_is_a_site():
+    src = "@server.call_tool()\nasync def h(name, arguments):\n    os.remove(arguments['path'])\n"
+    sites, passed, findings = run(src)
+    assert (sites, passed) == (1, 0)
+    assert "argument 'path'" in findings[0].message
+
+
+def test_validated_local_from_arguments_dict_passes():
+    src = (
+        "@server.call_tool()\nasync def h(name, arguments):\n"
+        "    path = arguments.get('path')\n"
+        "    if not path.startswith(ROOT):\n        raise ValueError\n"
+        "    os.remove(path)\n"
+    )
+    assert run(src)[:2] == (1, 1)
+
+
+def test_an_approval_check_is_not_input_validation():
+    sites, passed, _ = run(tool(
+        "if not request_approval('delete', path):\n    return\nos.remove(path)"
+    ))
+    assert (sites, passed) == (1, 0)
+
+
+def test_validation_of_a_derived_value_counts():
+    src = tool(
+        "argv = shlex.split(command)\n"
+        "if not argv or argv[0] not in ALLOWED:\n    raise ValueError\n"
+        "subprocess.run(argv)",
+        "command",
+    )
+    assert run(src)[:2] == (1, 1)
+
+
+def test_derived_validation_does_not_cover_raw_use_of_the_input():
+    src = tool(
+        "argv = shlex.split(command)\n"
+        "if argv[0] not in ALLOWED:\n    raise ValueError\n"
+        "subprocess.run(command, shell=True)",
+        "command",
+    )
+    assert run(src)[:2] == (1, 0)
+

@@ -83,6 +83,7 @@ CORPUS = [
 
 CONFIGS = [
     RuleConfig(),
+    RuleConfig(scope="all"),
     RuleConfig(assume_external_rate_limiting=True),
     RuleConfig(approval_markers=("vet",), log_tokens=frozenset({"telemetry"})),
     RuleConfig(disabled_rules=frozenset({"rate-limiting"})),
@@ -92,6 +93,9 @@ CONFIGS = [
 def contexts(config: RuleConfig):
     for src in CORPUS:
         yield FileContext.from_source(src, path="mem.py", config=config)
+
+
+ALL = RuleConfig(scope="all")
 
 
 @pytest.mark.parametrize("src", CORPUS)
@@ -162,7 +166,7 @@ def test_scanning_the_same_tree_twice_gives_identical_json(tmp_path):
         (tmp_path / f"m{i:02d}.py").write_text(src)
     (tmp_path / "pkg").mkdir()
     (tmp_path / "pkg" / "server.py").write_text(
-        "import shutil\ndef wipe(p):\n    shutil.rmtree(p)\n"
+        "import shutil\n@mcp.tool()\ndef wipe(p):\n    shutil.rmtree(p)\n"
     )
 
     first = json.dumps(scan(tmp_path).to_dict(), indent=2)
@@ -187,13 +191,18 @@ def test_json_report_top_level_keys_are_stable():
     assert set(report.to_dict()) == {
         "score",
         "max_score",
+        "min_score",
         "verdict",
         "files_scanned",
         "config_files_scanned",
         "total_sites",
         "critical_gate_active",
+        "scope",
+        "tool_functions",
+        "out_of_scope_sensitive_calls",
         "categories",
         "findings",
+        "accepted_risks",
         "skipped",
         "excluded",
         "suppressed",
@@ -208,17 +217,19 @@ def test_json_finding_keys_are_stable():
     report = scan(FIXTURES / "vulnerable_server.py")
     finding = report.to_dict()["findings"][0]
 
-    assert set(finding) == {"rule", "file", "line", "message", "fix", "critical"}
+    assert set(finding) == {
+        "rule", "file", "line", "column", "function", "message", "fix", "critical"
+    }
 
 
-def test_verdict_is_always_one_of_three_values(tmp_path):
-    (tmp_path / "a.py").write_text("import shutil\ndef f(p):\n    shutil.rmtree(p)\n")
+def test_verdict_is_always_one_of_the_documented_values(tmp_path):
+    (tmp_path / "a.py").write_text("import shutil\n@mcp.tool()\ndef f(p):\n    shutil.rmtree(p)\n")
     (tmp_path / "b.py").write_text("def broken(:\n")
     (tmp_path / "c.py").write_text("auto_approve = False\n")
 
-    for config in (Config(), Config(exclude=("a.py",))):
+    for config in (Config(), Config(exclude=("a.py",)), Config(min_score=0)):
         assert scan(tmp_path, config=config).verdict in {
-            "PASS", "FAIL_CRITICAL", "INCOMPLETE"
+            "PASS", "FAIL_CRITICAL", "FAIL_SCORE", "INCOMPLETE"
         }
 
 
@@ -235,7 +246,7 @@ def test_verdict_is_always_one_of_three_values(tmp_path):
 )
 def test_no_suppression_can_turn_a_critical_sink_into_a_pass(marker):
     ctx = FileContext.from_source(
-        f"import shutil\ndef wipe(p):\n    shutil.rmtree(p)  {marker}\n",
+        f"import shutil\n@mcp.tool()\ndef wipe(p):\n    shutil.rmtree(p)  {marker}\n",
         path="mem.py",
     )
     report = score_contexts([ctx])
@@ -250,8 +261,9 @@ def test_no_suppression_can_turn_a_critical_sink_into_a_pass(marker):
 # on proprietary code has to be able to back that claim up, and a promise in
 # a markdown file is not a guarantee -- this test is.
 ALLOWED_STDLIB_IMPORTS = {
-    "argparse", "ast", "dataclasses", "fnmatch", "functools", "io", "json",
-    "os", "pathlib", "re", "sys", "tokenize", "tomllib", "typing",
+    "argparse", "ast", "collections", "dataclasses", "fnmatch", "functools",
+    "hashlib", "io", "json", "os", "pathlib", "re", "sys", "tokenize",
+    "tomllib", "typing",
 }
 
 PACKAGE = Path(__file__).parent.parent / "agentgauge"
@@ -328,11 +340,61 @@ def test_agentgauge_scanning_itself_produces_no_warnings():
     """
     report = scan(PACKAGE)
 
-    # The one warning that IS expected here: the package has no sensitive
-    # calls, tool functions or governance flags of its own, so every category
-    # has zero sites. That note is the honest thing to say about a 100/100
-    # earned by having nothing to check -- see test_zero_applicable_sites.
-    unexpected = [w for w in report.warnings if "absence of anything" not in w]
+    # The one warning that IS expected here: the package defines no agent
+    # tools, so nothing in it is agent-reachable and nothing was judged.
+    unexpected = [
+        w for w in report.warnings if "no tool entry points recognized" not in w
+    ]
 
     assert unexpected == [], unexpected
     assert report.skipped == []
+
+
+# Path methods that can only mean a filesystem write, and os/shutil
+# functions that do. (str.replace and list.remove share names with the
+# latter, so those are matched only on an os/shutil receiver.)
+_PATH_WRITES = frozenset({
+    "write_text", "write_bytes", "mkdir", "makedirs", "unlink", "rmtree",
+    "touch", "symlink_to", "hardlink_to", "chmod",
+})
+_MODULE_WRITES = frozenset({"remove", "replace", "rename", "rmdir", "move", "copy"})
+
+
+def test_the_only_filesystem_write_is_the_baseline_the_user_asked_for():
+    # README: "Files written: only the baseline file you name with
+    # --update-baseline". Any other write-shaped call is a broken promise.
+    offenders = []
+    for source in sorted(PACKAGE.rglob("*.py")):
+        tree = ast.parse(source.read_text(encoding="utf-8"))
+        for fn in ast.walk(tree):
+            if not isinstance(fn, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                continue
+            for node in ast.walk(fn):
+                if not (isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute)):
+                    continue
+                attr = node.func.attr
+                receiver = node.func.value
+                on_module = isinstance(receiver, ast.Name) and receiver.id in ("os", "shutil")
+                if attr in _PATH_WRITES or (on_module and attr in _MODULE_WRITES):
+                    offenders.append(f"{source.name}:{fn.name}:{attr}")
+    assert offenders == ["baseline.py:write_baseline:write_text"], offenders
+
+
+def test_package_never_reads_the_environment():
+    # README: "Environment: never read."
+    for source in sorted(PACKAGE.rglob("*.py")):
+        for node in ast.walk(ast.parse(source.read_text(encoding="utf-8"))):
+            if isinstance(node, ast.Attribute):
+                assert node.attr not in ("environ", "getenv", "environb"), (
+                    f"{source.name}:{node.lineno} reads the environment"
+                )
+
+
+def test_readme_and_security_list_the_actual_imports():
+    expected = ", ".join(sorted(ALLOWED_STDLIB_IMPORTS))
+    root = PACKAGE.parent
+    readme = (root / "README.md").read_text(encoding="utf-8")
+    security = " ".join((root / "SECURITY.md").read_text(encoding="utf-8").split())
+    assert f"`{expected}`" in readme
+    assert f"`{expected}`" in security
+

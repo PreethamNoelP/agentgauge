@@ -1,9 +1,17 @@
+import dataclasses
+
+import pytest
+
 from agentgauge.astutils import FileContext
 from agentgauge.config import RuleConfig
 from agentgauge.rules import audit
 
 
-def run(src: str, config: RuleConfig | None = None):
+def run(src: str, config: RuleConfig | None = None, scope: str = "all"):
+    """Rule mechanics are tested in scope "all" (every function with a sink
+    is a tool), so a snippet needs no tool decorator to be judged. Tool-
+    scope behavior has its own tests below and in test_callgraph.py."""
+    config = dataclasses.replace(config or RuleConfig(), scope=scope)
     return audit.check(FileContext.from_source(src, path="mem.py", config=config))
 
 
@@ -82,3 +90,19 @@ def test_aliased_log_helper_still_counts():
     )
     assert (sites, passed) == (1, 1)
     assert findings == []
+
+
+@pytest.mark.parametrize("call", ["math.log(2)", "np.log(x)", "torch.log(t)", "math.log10(3)"])
+def test_math_log_is_not_audit_logging(call):
+    sites, passed, _ = run(f"@tool\ndef t(x):\n    {call}\n    return x\n")
+    assert (sites, passed) == (1, 0)
+
+
+@pytest.mark.parametrize("call", [
+    "logging.info('x')", "log.warning('x')", "self.logger.error('x')",
+    "await ctx.info('x')", "audit.write(event)", "structlog.get_logger().info('x')",
+    "record_audit(x)",
+])
+def test_real_logging_calls_count(call):
+    src = f"@tool\nasync def t(self, x, ctx: Context):\n    {call}\n    return x\n"
+    assert run(src)[:2] == (1, 1)

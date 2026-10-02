@@ -2,11 +2,29 @@ import json
 
 import pytest
 
-from agentgauge import __version__
-from agentgauge import cli
+from agentgauge import __version__, cli
 from agentgauge.cli import _print_report, main
 from agentgauge.models import CategoryResult, Finding
 from agentgauge.scoring import ScanReport
+
+# A tool with every control present, so a test can add exactly one problem
+# to it and observe that problem alone.
+GOVERNED = (
+    "import shutil\n"
+    "@mcp.tool()\n"
+    "def wipe(path):\n"
+    "    if not path.startswith('/data/'):\n"
+    "        raise ValueError('outside sandbox')\n"
+    "    if not request_approval('wipe', path):\n"
+    "        return False\n"
+    "    rate_limiter.acquire()\n"
+    "    try:\n"
+    "        shutil.rmtree(path)\n"
+    "    except OSError as exc:\n"
+    "        logger.error('wipe failed: %s', exc)\n"
+    "    audit_log('wipe', path)\n"
+    "    return True\n"
+)
 
 
 def test_clean_scan_prints_score_and_exits_zero(tmp_path, capsys):
@@ -21,7 +39,7 @@ def test_clean_scan_prints_score_and_exits_zero(tmp_path, capsys):
 
 def test_min_score_gate_returns_one(tmp_path, capsys):
     (tmp_path / "bad.py").write_text(
-        "def wipe(path):\n    shutil.rmtree(path)\n"
+        "@mcp.tool()\ndef wipe(path):\n    shutil.rmtree(path)\n"
     )
 
     code = main([str(tmp_path), "--min-score", "70"])
@@ -34,7 +52,7 @@ def test_critical_finding_returns_one_even_without_min_score(tmp_path, capsys):
     # A live, unguarded critical action must fail the build on its own --
     # no --min-score needed to catch it (critical-site dilution).
     (tmp_path / "bad.py").write_text(
-        "def wipe(path):\n    shutil.rmtree(path)\n"
+        "@mcp.tool()\ndef wipe(path):\n    shutil.rmtree(path)\n"
     )
 
     code = main([str(tmp_path)])
@@ -47,7 +65,7 @@ def test_critical_finding_returns_one_even_above_min_score(tmp_path, capsys):
     # A permissive --min-score must not buy back a pass on a critical
     # finding just because the aggregate score clears the bar.
     (tmp_path / "bad.py").write_text(
-        "def wipe(path):\n    shutil.rmtree(path)\n"
+        "@mcp.tool()\ndef wipe(path):\n    shutil.rmtree(path)\n"
     )
 
     code = main([str(tmp_path), "--min-score", "1"])
@@ -56,7 +74,7 @@ def test_critical_finding_returns_one_even_above_min_score(tmp_path, capsys):
 
 
 def test_json_output_is_parseable(tmp_path, capsys):
-    (tmp_path / "flags.py").write_text("auto_approve = True\n")
+    (tmp_path / "flags.py").write_text(GOVERNED + "auto_approve = True\n")
 
     code = main([str(tmp_path), "--json"])
 
@@ -206,7 +224,7 @@ def test_fail_on_incomplete_turns_a_partial_scan_red(tmp_path, capsys):
 
 
 def test_fail_on_incomplete_does_not_affect_a_complete_scan(tmp_path):
-    (tmp_path / "ok.py").write_text("auto_approve = False\n")
+    (tmp_path / "ok.py").write_text(GOVERNED + "auto_approve = False\n")
 
     assert main([str(tmp_path), "--fail-on-incomplete"]) == 0
 
@@ -224,6 +242,17 @@ def test_zero_sites_cannot_pass_the_strictest_gate(tmp_path, capsys):
     assert code == 1
     assert "INCOMPLETE" in captured.out
     assert "APPLICABLE SITES" in captured.out
+    assert "no tool entry points recognized" in captured.err
+
+
+def test_zero_sites_in_scope_all_cannot_pass_the_strictest_gate(tmp_path, capsys):
+    (tmp_path / "util.py").write_text("def add(a, b):\n    return a + b\n")
+
+    code = main([str(tmp_path), "--scope", "all", "--min-score", "100", "--fail-on-incomplete"])
+
+    captured = capsys.readouterr()
+    assert code == 1
+    assert "INCOMPLETE" in captured.out
     assert "absence of anything to check" in captured.err
 
 
@@ -246,9 +275,9 @@ def test_disabled_gate_rule_is_warned_about_and_not_a_pass(tmp_path, capsys):
     (tmp_path / "pyproject.toml").write_text(
         "[tool.agentgauge]\ndisabled_rules = ['human-oversight']\n"
     )
-    (tmp_path / "server.py").write_text(
-        "import shutil\ndef wipe(path):\n    shutil.rmtree(path)\n"
-    )
+    (tmp_path / "server.py").write_text(GOVERNED.replace(
+        "    if not request_approval('wipe', path):\n        return False\n", ""
+    ))
 
     code = main([str(tmp_path), "--fail-on-incomplete"])
 
@@ -366,7 +395,7 @@ def test_unknown_config_key_is_a_usage_error(tmp_path, capsys):
 def test_scan_with_no_applicable_sites_says_so(tmp_path, capsys):
     (tmp_path / "server.py").write_text("def add(a, b):\n    return a + b\n")
 
-    code = main([str(tmp_path)])
+    code = main([str(tmp_path), "--scope", "all"])
 
     captured = capsys.readouterr()
     assert code == 0
@@ -392,7 +421,7 @@ def test_closed_stdout_pipe_does_not_break_the_exit_code(tmp_path, monkeypatch):
     # consumer finishing early, not a scan failure, so the exit code must
     # still reflect the governance result.
     (tmp_path / "bad.py").write_text(
-        "import shutil\ndef wipe(path):\n    shutil.rmtree(path)\n"
+        "import shutil\n@mcp.tool()\ndef wipe(path):\n    shutil.rmtree(path)\n"
     )
     redirected = _break_the_pipe(monkeypatch)
 
@@ -469,7 +498,7 @@ def test_baseline_gates_only_on_new_findings(tmp_path, capsys):
 
 def test_baseline_never_suppresses_a_critical_finding(tmp_path):
     (tmp_path / "server.py").write_text(
-        "import shutil\ndef wipe(path):\n    shutil.rmtree(path)\n"
+        "import shutil\n@mcp.tool()\ndef wipe(path):\n    shutil.rmtree(path)\n"
     )
     baseline_path = tmp_path / "baseline.json"
 
@@ -516,3 +545,61 @@ def test_baseline_hides_pre_existing_findings_from_human_output(tmp_path, capsys
     assert code == 0
     assert "Findings" not in out  # nothing new to list
     assert "hidden by baseline" in out
+
+
+# --- new flags --------------------------------------------------------------
+
+def test_default_floor_fails_a_poorly_governed_scan(tmp_path, capsys):
+    (tmp_path / "s.py").write_text(
+        GOVERNED.replace("    audit_log('wipe', path)\n", "")
+        .replace("    rate_limiter.acquire()\n", "")
+        .replace("        logger.error('wipe failed: %s', exc)\n", "        return False\n")
+    )
+    assert main([str(tmp_path)]) == 1
+    assert "FAIL_SCORE" in capsys.readouterr().out
+    assert main([str(tmp_path), "--min-score", "0"]) == 0
+
+
+def test_min_score_out_of_range_is_a_usage_error(tmp_path):
+    (tmp_path / "s.py").write_text(GOVERNED)
+    assert main([str(tmp_path), "--min-score", "150"]) == 2
+
+
+def test_scope_flag_overrides_config(tmp_path, capsys):
+    (tmp_path / "s.py").write_text("import os\ndef f(p):\n    os.remove(p)\n")
+    assert main([str(tmp_path)]) == 0  # INCOMPLETE: no tools recognized
+    capsys.readouterr()
+    assert main([str(tmp_path), "--scope", "all"]) == 1
+    assert "FAIL_CRITICAL" in capsys.readouterr().out
+
+
+def test_accepted_risks_are_listed_and_can_be_ignored(tmp_path, capsys):
+    (tmp_path / "pyproject.toml").write_text(
+        "[tool.agentgauge]\n"
+        "[[tool.agentgauge.accepted_risks]]\n"
+        'rule = "human-oversight"\nfile = "s.py"\nfunction = "wipe"\n'
+        'reason = "deletes only the scratch dir it created"\n'
+    )
+    (tmp_path / "s.py").write_text(
+        GOVERNED.replace("    if not request_approval('wipe', path):\n        return False\n", "")
+    )
+    import os
+
+    cwd = os.getcwd()
+    os.chdir(tmp_path)
+    try:
+        assert main(["."]) == 0
+        out = capsys.readouterr().out
+        assert "Accepted risks (1)" in out
+        assert "deletes only the scratch dir it created" in out
+        assert main([".", "--ignore-accepted-risks"]) == 1
+    finally:
+        os.chdir(cwd)
+
+
+def test_report_shows_tool_entry_points_and_out_of_scope_sinks(tmp_path, capsys):
+    (tmp_path / "s.py").write_text(GOVERNED + "def maintenance():\n    os.system('make')\n")
+    main([str(tmp_path)])
+    out = capsys.readouterr().out
+    assert "TOOL ENTRY POINTS" in out
+    assert "NOT AGENT-REACHABLE" in out

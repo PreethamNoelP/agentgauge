@@ -1,17 +1,21 @@
 """Rule 4 of 6: Error handling (15 points).
 
-Two kinds of sites feed this category:
+Two kinds of agent-reachable sites feed this category:
   1. Unconditional loops (while True / while 1): must contain an exit that
      actually leaves them -- a break at THIS loop's level (not a nested
      loop's), a return/raise (not inside a nested def), or sys.exit.
-  2. Sensitive calls: must sit inside the *body* of a try. Handlers, else
-     and finally don't count -- code there isn't protected by that try.
+  2. Sensitive calls: must sit inside the *body* of a try that handles the
+     failure -- in their own function, or at every reachable call site of
+     the helper that contains them ("helper raises, caller handles"). Handlers, else and finally don't count -- code there isn't
+     protected by that try -- and neither does a try with no handler or one
+     whose broad handler silently discards the error (`except Exception:
+     pass`), which hides a failed destructive action from everyone.
 """
 
 import ast
 from typing import TypeGuard
 
-from agentgauge.astutils import FileContext, call_name
+from agentgauge.astutils import FileContext, call_name, enclosing_function
 from agentgauge.models import Finding
 
 RULE_ID = "error-handling"
@@ -19,16 +23,12 @@ CATEGORY = "Error handling"
 WEIGHT = 15
 
 _EXIT_CALLS = frozenset({"sys.exit", "os._exit", "exit", "quit"})
-# ast.TryStar has existed since 3.11, which is this package's floor
-# (requires-python = ">=3.11"), so the hasattr guard this used to carry was
-# unreachable compatibility code for an interpreter agentgauge cannot run on.
 _TRY_TYPES = (ast.Try, ast.TryStar)
+_BROAD_EXCEPTIONS = frozenset({"Exception", "BaseException", "builtins.Exception"})
 
 
 def _is_unconditional_loop(node: ast.AST) -> TypeGuard[ast.While]:
-    """True for `while True:` / `while 1:`. Narrows the type as well as
-    answering the question, so callers get an ast.While without a second
-    isinstance check that could drift out of sync with this one."""
+    """True for `while True:` / `while 1:`."""
     return (
         isinstance(node, ast.While)
         and isinstance(node.test, ast.Constant)
@@ -61,24 +61,57 @@ def _loop_can_exit(loop: ast.While, aliases: dict[str, str]) -> bool:
     return scan(loop, False)
 
 
-def _in_try_body(node: ast.AST, parents: dict[ast.AST, ast.AST]) -> bool:
-    """Climb the parent map; when we hit a Try, `prev` is the direct child
-    we climbed through, which tells us WHICH compartment held the node."""
+def _is_broad(handler: ast.ExceptHandler) -> bool:
+    if handler.type is None:
+        return True
+    types = handler.type.elts if isinstance(handler.type, ast.Tuple) else [handler.type]
+    for t in types:
+        name = call_name(ast.Call(func=t, args=[], keywords=[]))
+        if name in _BROAD_EXCEPTIONS:
+            return True
+    return False
+
+
+def _is_silent(handler: ast.ExceptHandler) -> bool:
+    """A broad handler whose body only discards the error."""
+    if not _is_broad(handler):
+        return False
+    return all(
+        isinstance(stmt, (ast.Pass, ast.Continue, ast.Break))
+        or (isinstance(stmt, ast.Expr) and isinstance(stmt.value, ast.Constant))
+        for stmt in handler.body
+    )
+
+
+def _handled(try_node: ast.Try | ast.TryStar) -> bool:
+    return bool(try_node.handlers) and not any(_is_silent(h) for h in try_node.handlers)
+
+
+def protection(node: ast.AST, parents: dict[ast.AST, ast.AST]) -> str:
+    """'handled', 'swallowed', or 'none' for the nearest try whose body holds
+    the node. Climbs the parent map; at each Try, `prev` is the direct child
+    climbed through, which tells which compartment held the node."""
     prev, current = node, parents.get(node)
     while current is not None:
-        if isinstance(current, (ast.Try, ast.TryStar)) and any(
-            prev is s for s in current.body
-        ):
-            return True
+        if isinstance(current, (ast.FunctionDef, ast.AsyncFunctionDef, ast.Lambda)):
+            return "none"
+        if isinstance(current, _TRY_TYPES) and any(prev is s for s in current.body):
+            if _handled(current):
+                return "handled"
+            if current.handlers:
+                return "swallowed"
         prev, current = current, parents.get(current)
-    return False
+    return "none"
 
 
 def check(ctx: FileContext) -> tuple[int, int, list[Finding]]:
     sites, passed, findings = 0, 0, []
 
-    for node in ast.walk(ctx.tree):
+    for node in ctx.all_nodes:
         if not _is_unconditional_loop(node):
+            continue
+        fn = enclosing_function(node, ctx.parents)
+        if not ctx.in_scope(fn):
             continue
         sites += 1
         if _loop_can_exit(node, ctx.import_aliases):
@@ -89,6 +122,8 @@ def check(ctx: FileContext) -> tuple[int, int, list[Finding]]:
                 rule=RULE_ID,
                 file=ctx.path,
                 line=node.lineno,
+                column=node.col_offset + 1,
+                function=ctx.qualname(fn),
                 message="unbounded 'while True' loop with no break, return or raise",
                 fix="Add a termination path: a max-iteration counter, a timeout, "
                     "or a break on a stop signal",
@@ -96,19 +131,34 @@ def check(ctx: FileContext) -> tuple[int, int, list[Finding]]:
         )
 
     for call, label in ctx.sensitive_calls:
+        fn = enclosing_function(call, ctx.parents)
+        if not ctx.in_scope(fn):
+            continue
         sites += 1
-        if _in_try_body(call, ctx.parents):
+        state = protection(call, ctx.parents)
+        if state == "handled" or (
+            state == "none" and fn is not None and ctx.is_protected(fn)
+        ):
             passed += 1
             continue
+        name = call_name(call, ctx.import_aliases) or "<dynamic>"
+        if state == "swallowed":
+            message = (
+                f"{label} call '{name}' is wrapped in a try whose broad "
+                "handler silently discards the error"
+            )
+        else:
+            message = f"{label} call '{name}' is not wrapped in try/except"
         findings.append(
             Finding(
                 rule=RULE_ID,
                 file=ctx.path,
                 line=call.lineno,
-                message=f"{label} call '{call_name(call, ctx.import_aliases)}' "
-                        "is not wrapped in try/except",
-                fix="Wrap the call in try/except; log the failure and return a "
-                    "safe error to the caller instead of crashing",
+                column=call.col_offset + 1,
+                function=ctx.qualname(fn),
+                message=message,
+                fix="Catch the specific failure; log it and return a safe error "
+                    "to the caller instead of crashing or hiding it",
             )
         )
 

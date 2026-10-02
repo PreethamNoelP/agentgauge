@@ -11,7 +11,7 @@ from agentgauge.scanner import escapes_scan_root, iter_python_files, scan
 def test_scan_walks_directory_and_skips_junk_dirs(tmp_path):
     (tmp_path / "pkg").mkdir()
     (tmp_path / "pkg" / "server.py").write_text(
-        "def wipe(path):\n    shutil.rmtree(path)\n"
+        "@mcp.tool()\ndef wipe(path):\n    shutil.rmtree(path)\n"
     )
     (tmp_path / ".venv").mkdir()
     (tmp_path / ".venv" / "lib.py").write_text("auto_approve = True\n")
@@ -47,10 +47,10 @@ def test_recursion_error_is_skipped_not_fatal(tmp_path, monkeypatch):
 
     class ExplodingFileContext:
         @staticmethod
-        def from_source(source, path="<memory>", config=None):
+        def from_source(source, path="<memory>", config=None, **kwargs):
             if path == "deep.py":
                 raise RecursionError
-            return FileContext.from_source(source, path=path, config=config)
+            return FileContext.from_source(source, path=path, config=config, **kwargs)
 
     monkeypatch.setattr(scanner_module, "FileContext", ExplodingFileContext)
 
@@ -122,7 +122,7 @@ def test_repo_living_under_a_skip_named_directory_is_still_scanned(tmp_path):
     # skipped and the scan exited "no Python files scanned".
     root = tmp_path / "build" / "myrepo"
     root.mkdir(parents=True)
-    (root / "server.py").write_text("import shutil\ndef f(p):\n    shutil.rmtree(p)\n")
+    (root / "server.py").write_text("import shutil\n@mcp.tool()\ndef f(p):\n    shutil.rmtree(p)\n")
 
     report = scan(root)
 
@@ -307,7 +307,7 @@ def test_symlink_out_of_the_tree_is_refused_and_reported(tmp_path):
 
     outside = tmp_path / "outside"
     outside.mkdir()
-    (outside / "private.py").write_text("import os\ndef f(p):\n    os.remove(p)\n")
+    (outside / "private.py").write_text("import os\n@mcp.tool()\ndef f(p):\n    os.remove(p)\n")
     root = tmp_path / "repo"
     root.mkdir()
     (root / "real.py").write_text("auto_approve = True\n")
@@ -330,7 +330,7 @@ def test_symlink_inside_the_tree_is_followed(tmp_path):
     root = tmp_path / "repo"
     (root / "shared").mkdir(parents=True)
     (root / "shared" / "util.py").write_text(
-        "import shutil\ndef wipe(p):\n    shutil.rmtree(p)\n"
+        "import shutil\n@mcp.tool()\ndef wipe(p):\n    shutil.rmtree(p)\n"
     )
     (root / "pkg").mkdir()
     (root / "pkg" / "util.py").symlink_to(root / "shared" / "util.py")
@@ -456,7 +456,7 @@ def test_skip_dirs_are_not_counted_as_config_exclusions(tmp_path):
 
     assert report.files_scanned == 1
     assert report.excluded == 0
-    assert report.warnings == []
+    assert not any("exclude" in w for w in report.warnings)
 
 
 def test_exclude_hiding_every_sink_cannot_produce_a_pass(tmp_path):
@@ -466,7 +466,7 @@ def test_exclude_hiding_every_sink_cannot_produce_a_pass(tmp_path):
     # disabled_rules was already blocked from doing this; exclude was not.
     (tmp_path / "src").mkdir()
     (tmp_path / "src" / "server.py").write_text(
-        "import shutil\ndef wipe(path):\n    shutil.rmtree(path)\n"
+        "import shutil\n@mcp.tool()\ndef wipe(path):\n    shutil.rmtree(path)\n"
     )
     (tmp_path / "harmless.py").write_text("def add(a, b):\n    return a + b\n")
 

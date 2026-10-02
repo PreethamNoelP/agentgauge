@@ -10,11 +10,18 @@ import ast
 import io
 import re
 import tokenize
+from collections import deque
+from collections.abc import Iterable, Iterator
 from dataclasses import dataclass, field
 from functools import cached_property
-from typing import Iterator
+from typing import TYPE_CHECKING
 
+from agentgauge import suppression
 from agentgauge.config import RuleConfig
+
+if TYPE_CHECKING:
+    from agentgauge.approval import ApprovalAnalyzer
+    from agentgauge.callgraph import ProgramIndex
 
 # Full dotted names that always mean a sensitive action. Matched exactly,
 # so harmless lookalikes (platform.system, df.eval) are not flagged.
@@ -127,7 +134,49 @@ SENSITIVE_SUFFIX: dict[str, str] = {
 # catastrophic site across many low-risk ones -- see "critical-site
 # dilution" in RULES.md).
 CRITICAL_LABELS = frozenset(
-    {"file delete", "shell exec", "code exec", "payment", "remote delete"}
+    {"file delete", "shell exec", "code exec", "payment", "remote delete",
+     "sql exec"}
+)
+
+# Database-API methods that run a query string. Generic names, so they only
+# count on a receiver that looks like a DB handle *and* with a query that is
+# not a string constant: a fixed, parameterized query is not the risk; a
+# query assembled from (or equal to) model input is.
+SQL_METHODS = frozenset({"execute", "executemany", "executescript", "exec_driver_sql"})
+SQL_RECEIVER_TOKENS = frozenset({
+    "cursor", "cur", "conn", "connection", "con", "db", "database",
+    "session", "engine", "sqlite", "sqlite3", "pg", "postgres", "mysql",
+    "duckdb", "pool", "tx", "transaction",
+})
+
+# Payment-SDK resources (Stripe's stripe.Refund / client.refunds, and the
+# same nouns in Braintree, Adyen, Square, PayPal SDKs) and the methods that
+# move money on them: stripe.Refund.create(...), client.payment_intents
+# .confirm(...), gateway.transaction.sale(...).
+PAYMENT_RESOURCES = frozenset({
+    "charge", "charges", "paymentintent", "paymentintents", "refund",
+    "refunds", "transfer", "transfers", "payout", "payouts", "payment",
+    "payments", "transaction", "transactions", "subscription",
+    "subscriptions", "invoice", "invoices",
+})
+PAYMENT_METHODS = frozenset({
+    "create", "capture", "confirm", "pay", "send", "sale", "submit",
+    "create_and_confirm", "submit_for_settlement",
+})
+
+# Kubernetes client deletes: delete_namespaced_pod, delete_collection_
+# namespaced_secret, delete_cluster_role, ...
+REMOTE_DELETE_PREFIXES = ("delete_namespaced_", "delete_collection_", "delete_cluster_")
+
+# HTTP methods that create or move money when aimed at a payment API.
+HTTP_WRITE_METHODS = frozenset({"post", "put", "patch", "request", "fetch"})
+PAYMENT_HOSTS = (
+    "api.stripe.com", "api.paypal.com", "api-m.paypal.com",
+    "api-m.sandbox.paypal.com", "connect.squareup.com",
+    "api.braintreegateway.com", "checkout.adyen.com", "checkout-test.adyen.com",
+    "api.razorpay.com", "api.checkout.com", "api.mollie.com",
+    "api.paystack.co", "api.flutterwave.com", "api.wise.com",
+    "api.coinbase.com",
 )
 
 
@@ -161,6 +210,14 @@ def dotted_name(node: ast.expr, aliases: dict[str, str] | None = None) -> str | 
     while isinstance(node, ast.Attribute):
         parts.append(node.attr)
         node = node.value
+    if isinstance(node, ast.Call):
+        # getattr(os, "system"), __import__("os"), importlib.import_module("os")
+        # with constant arguments name a target exactly as statically as
+        # os.system does; only the spelling differs.
+        base_name = _static_call_target(node, aliases)
+        if base_name is None:
+            return None
+        return base_name if not parts else f"{base_name}.{'.'.join(reversed(parts))}"
     if isinstance(node, ast.Name):
         base = node.id
         if aliases and base in aliases:
@@ -171,41 +228,205 @@ def dotted_name(node: ast.expr, aliases: dict[str, str] | None = None) -> str | 
     return None
 
 
+def _const_str(node: ast.expr | None) -> str | None:
+    if isinstance(node, ast.Constant) and isinstance(node.value, str):
+        return node.value
+    return None
+
+
+def _static_call_target(
+    call: ast.Call, aliases: dict[str, str] | None
+) -> str | None:
+    """The dotted name a constant-argument getattr/__import__ call evaluates
+    to, or None for anything else."""
+    func = call.func
+    func_name = (
+        func.id if isinstance(func, ast.Name)
+        else dotted_name(func, aliases) if isinstance(func, ast.Attribute)
+        else None
+    )
+    if func_name == "getattr" and len(call.args) >= 2:
+        attr = _const_str(call.args[1])
+        obj = dotted_name(call.args[0], aliases)
+        if attr is not None and obj is not None:
+            return f"{obj}.{attr}"
+    if func_name in ("__import__", "importlib.import_module") and call.args:
+        return _const_str(call.args[0])
+    return None
+
+
 def call_name(call: ast.Call, aliases: dict[str, str] | None = None) -> str | None:
     """Dotted name of what a Call node is calling, or None if dynamic."""
     return dotted_name(call.func, aliases)
 
 
-def sensitive_label(call: ast.Call, aliases: dict[str, str] | None = None) -> str | None:
-    """Action label ("file delete", "shell exec", ...) if this call looks
-    sensitive, else None. Exact table first, then the suffix table."""
-    name = call_name(call, aliases)
-    if name is not None:
-        if name in SENSITIVE_EXACT:
-            return SENSITIVE_EXACT[name]
-        return SENSITIVE_SUFFIX.get(name.rsplit(".", 1)[-1])
-    # dotted_name gave up because the receiver is dynamic
-    # (Path(p).unlink(), clients[key].charge()). The suffix table is
-    # receiver-agnostic by construction -- the method name alone is the
-    # whole signal -- so it still applies. The exact table does not: it
-    # exists precisely to require a known module chain.
-    if isinstance(call.func, ast.Attribute):
-        return SENSITIVE_SUFFIX.get(call.func.attr)
+def word_tokens(name: str) -> set[str]:
+    """Lowercase word tokens of a name, splitting on dots, underscores and
+    camelCase: 'FunctionTool.from_defaults' -> {function, tool, from, defaults}."""
+    spaced = re.sub(r"(?<=[a-z0-9])(?=[A-Z])", "_", name)
+    return {t for t in re.split(r"[._]", spaced.lower()) if t}
+
+
+def _string_value(node: ast.expr, constants: dict[str, str]) -> str | None:
+    """The text of a string-ish expression as far as it is statically known:
+    literals, module string constants, and the literal parts of an f-string
+    or `+` concatenation -- enough to see a host name."""
+    if isinstance(node, ast.Constant) and isinstance(node.value, str):
+        return node.value
+    if isinstance(node, ast.Name):
+        return constants.get(node.id)
+    if isinstance(node, ast.JoinedStr):
+        pieces = []
+        for v in node.values:
+            if isinstance(v, ast.Constant) and isinstance(v.value, str):
+                pieces.append(v.value)
+            elif isinstance(v, ast.FormattedValue):
+                pieces.append(_string_value(v.value, constants) or "")
+        return "".join(pieces)
+    if isinstance(node, ast.BinOp) and isinstance(node.op, ast.Add):
+        return (_string_value(node.left, constants) or "") + (
+            _string_value(node.right, constants) or ""
+        )
     return None
 
 
+def _is_constant_query(node: ast.expr, constants: dict[str, str]) -> bool:
+    """True if a query argument is a fixed string: a literal, a name bound
+    only to string literals in this file, or `text("...")`/`sql.SQL("...")`
+    wrapping one. f-strings, concatenation, .format() and %-formatting are
+    the dynamic shapes that make a query injectable."""
+    if isinstance(node, ast.Constant) and isinstance(node.value, str):
+        return True
+    if isinstance(node, ast.Name):
+        return node.id in constants
+    if isinstance(node, ast.Call) and len(node.args) == 1:
+        func = node.func
+        wrapper = (
+            func.id if isinstance(func, ast.Name)
+            else func.attr if isinstance(func, ast.Attribute)
+            else None
+        )
+        if wrapper in ("text", "SQL"):
+            return _is_constant_query(node.args[0], constants)
+    return False
+
+
+def _receiver_tokens(func: ast.Attribute) -> set[str]:
+    receiver = func.value
+    while isinstance(receiver, ast.Call):
+        receiver = receiver.func
+    if not isinstance(receiver, (ast.Name, ast.Attribute)):
+        return set()
+    name = dotted_name(receiver)
+    return word_tokens(name) if name else set()
+
+
+def _contextual_label(call: ast.Call, constants: dict[str, str]) -> str | None:
+    """Sinks a name alone cannot identify: dynamic SQL on a DB handle, and
+    HTTP writes aimed at a payment API."""
+    func = call.func
+    if not isinstance(func, ast.Attribute):
+        return None
+    if func.attr.startswith(REMOTE_DELETE_PREFIXES):
+        return "remote delete"
+    if func.attr in PAYMENT_METHODS:
+        receiver = func.value
+        while isinstance(receiver, ast.Call):
+            receiver = receiver.func
+        if isinstance(receiver, ast.Attribute):
+            noun = receiver.attr.lower().replace("_", "")
+            if noun in PAYMENT_RESOURCES:
+                return "payment"
+    if (
+        func.attr in SQL_METHODS
+        and call.args
+        and _receiver_tokens(func) & SQL_RECEIVER_TOKENS
+        and not _is_constant_query(call.args[0], constants)
+    ):
+        return "sql exec"
+    if func.attr in HTTP_WRITE_METHODS:
+        url_args = list(call.args[:2]) + [
+            kw.value for kw in call.keywords if kw.arg in ("url", "endpoint")
+        ]
+        for arg in url_args:
+            text = _string_value(arg, constants)
+            if text and any(host in text for host in PAYMENT_HOSTS):
+                return "payment"
+    return None
+
+
+def sensitive_label(
+    call: ast.Call,
+    aliases: dict[str, str] | None = None,
+    constants: dict[str, str] | None = None,
+) -> str | None:
+    """Action label ("file delete", "shell exec", ...) if this call looks
+    sensitive, else None. Exact table first, then the suffix table, then the
+    contextual checks (dynamic SQL, payment HTTP) that read the arguments.
+
+    `constants` maps names bound only to string literals to their value
+    (see build_string_constants)."""
+    name = call_name(call, aliases)
+    label: str | None = None
+    if name is not None:
+        label = SENSITIVE_EXACT.get(name) or SENSITIVE_SUFFIX.get(
+            name.rsplit(".", 1)[-1]
+        )
+    elif isinstance(call.func, ast.Attribute):
+        # The receiver is dynamic (Path(p).unlink(), clients[key].charge()).
+        # The suffix table is receiver-agnostic by construction, so it still
+        # applies; the exact table requires a known module chain.
+        label = SENSITIVE_SUFFIX.get(call.func.attr)
+    if label is None:
+        label = _contextual_label(call, constants or {})
+    return label
+
+
+def build_string_constants(
+    tree: ast.AST, nodes: Iterable[ast.AST] | None = None
+) -> dict[str, str]:
+    """Names bound only to string literals anywhere in the file (`QUERY =
+    "SELECT ..."`, `STRIPE_URL = "https://api.stripe.com/v1"`). A name that
+    is ever bound to anything else is left out: its value is not known."""
+    values: dict[str, str] = {}
+    poisoned: set[str] = set()
+    for node in nodes if nodes is not None else ast.walk(tree):
+        targets: list[ast.expr] = []
+        value: ast.expr | None = None
+        if isinstance(node, ast.Assign):
+            targets, value = list(node.targets), node.value
+        elif isinstance(node, ast.AnnAssign) and node.value is not None:
+            targets, value = [node.target], node.value
+        elif isinstance(node, (ast.AugAssign, ast.NamedExpr, ast.For, ast.AsyncFor, ast.comprehension)):
+            targets = [node.target]
+        elif isinstance(node, ast.arg):
+            poisoned.add(node.arg)
+        for target in targets:
+            if not isinstance(target, ast.Name):
+                continue
+            if isinstance(value, ast.Constant) and isinstance(value.value, str):
+                values.setdefault(target.id, value.value)
+            else:
+                poisoned.add(target.id)
+    return {k: v for k, v in values.items() if k not in poisoned}
+
+
 def iter_sensitive_calls(
-    tree: ast.AST, aliases: dict[str, str] | None = None
+    tree: ast.AST,
+    aliases: dict[str, str] | None = None,
+    constants: dict[str, str] | None = None,
 ) -> Iterator[tuple[ast.Call, str]]:
     """Yield (call_node, action_label) for every sensitive call in the tree."""
     for node in ast.walk(tree):
         if isinstance(node, ast.Call):
-            label = sensitive_label(node, aliases)
+            label = sensitive_label(node, aliases, constants)
             if label is not None:
                 yield node, label
 
 
-def build_import_aliases(tree: ast.AST) -> dict[str, str]:
+def build_import_aliases(
+    tree: ast.AST, nodes: Iterable[ast.AST] | None = None
+) -> dict[str, str]:
     """Map every locally-bound import name to the dotted name it actually
     refers to, so a call written through an import binding resolves to its
     canonical target instead of vanishing behind the local spelling:
@@ -240,16 +461,11 @@ def build_import_aliases(tree: ast.AST) -> dict[str, str]:
     (documented in RULES.md).
     """
     aliases: dict[str, str] = {}
-    # Single walk. Assignments are set aside rather than resolved in place,
-    # because resolution has to happen *after* every import is known -- see
-    # the second loop. This used to be two full ast.walk passes over the
-    # tree, which measured as the most expensive thing a scan did per file.
-    # Collecting once and replaying the (much shorter) assignment list
-    # preserves the ordering the two-pass version relied on: ast.walk order
-    # is stable, so a chain like `_a = sh.rmtree` then `_b = _a` still
-    # resolves in document order.
+    # Assignments are set aside and resolved after every import is known
+    # (the second loop). Walk order is stable, so a chain like
+    # `_a = sh.rmtree` then `_b = _a` resolves in document order.
     assignments: list[ast.Assign] = []
-    for node in ast.walk(tree):
+    for node in nodes if nodes is not None else ast.walk(tree):
         if isinstance(node, ast.Import):
             for alias in node.names:
                 if alias.asname is not None:
@@ -292,9 +508,9 @@ def iter_scope(scope: ast.AST) -> Iterator[ast.AST]:
     it is written.
     """
     yield scope
-    queue = list(ast.iter_child_nodes(scope))
+    queue = deque(ast.iter_child_nodes(scope))
     while queue:
-        node = queue.pop(0)
+        node = queue.popleft()
         if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
             continue
         yield node
@@ -313,7 +529,7 @@ def enclosing_function(
     return None
 
 
-"""Suppression marker patterns.
+"""Suppression marker introducer.
 
 Deliberately documented in a docstring rather than in `#` comments: this
 module is scanned by agentgauge like any other, and the tokenizer sees a
@@ -322,34 +538,9 @@ directive -- correctly, since that is exactly the "brackets forgotten"
 shape the strictness exists to catch. Writing the examples in a string
 keeps the module's own self-scan clean. See RULES.md.
 
-_SUPPRESS_RE matches the directive in either form: bare (suppresses every
-rule on that line) or bracketed with a comma-separated rule list -- the
-same shape as flake8's "noqa" and bandit's "nosec".
-
-The bracket group captures anything up to "]" rather than only well-formed
-rule ids on purpose. An earlier pattern accepted only [\\w, -]+ inside the
-brackets, which meant an empty or invalid list failed to match the
-bracketed alternative, fell back to the bare alternative, and silently
-escalated a narrow suppression into a blanket one. Matching greedily and
-validating afterwards keeps a malformed marker malformed. The \\b stops
-"ignored"/"ignoring" in prose from being read as a directive.
-
-_REASON_RE gates the trailing text. A free-text reason may follow, but it
-has to announce itself with "--", ":" or "#". A bare directive followed by
-bare prose is malformed, not blanket: forgetting the brackets around a
-rule name must not suppress every rule on the line, including rules added
-in later versions.
+Only the introducer lives here; the grammar is agentgauge/suppression.py.
 """
-_SUPPRESS_RE = re.compile(
-    r"#\s*agentgauge:\s*ignore\b[ \t]*(\[[^\]]*\])?[ \t]*(.*)$", re.IGNORECASE
-)
-_REASON_RE = re.compile(r"^(--|:|#)")
-
-_MARKER_RE = re.compile(r"agentgauge", re.IGNORECASE)
-
-# Rule ids are lowercase kebab-case ("human-oversight"). Anything else in a
-# suppression list is a typo, not a rule we might not know about yet.
-_RULE_ID_RE = re.compile(r"^[a-z][a-z0-9]*(?:-[a-z0-9]+)*$")
+_SUPPRESS_RE = suppression.marker_pattern(r"#")
 
 
 def _parse_suppressions(
@@ -372,39 +563,19 @@ def _parse_suppressions(
     """
     suppressions: dict[int, frozenset[str] | None] = {}
     malformed: list[tuple[int, str]] = []
-    # Tokenizing every file to find a marker almost none of them contain was
-    # ~8% of scan time. A source without the word cannot hold a marker.
-    if _MARKER_RE.search(source) is None:
+    if not suppression.contains_marker_word(source):
         return suppressions, malformed
     try:
         for tok in tokenize.generate_tokens(io.StringIO(source).readline):
             if tok.type != tokenize.COMMENT:
                 continue
-            match = _SUPPRESS_RE.search(tok.string)
-            if match is None:
+            marker = suppression.parse_marker(tok.string, _SUPPRESS_RE)
+            if marker is None:
                 continue
-            line = tok.start[0]
-            brackets = match.group(1)
-            trailing = match.group(2).strip()
-            if brackets is None:
-                if trailing and not _REASON_RE.match(trailing):
-                    malformed.append(
-                        (line, f"unexpected text after 'ignore': {trailing!r} "
-                               "-- name rules as ignore[rule-id], or start a "
-                               "reason with '--'")
-                    )
-                else:
-                    suppressions[line] = None
-                continue
-            rules = [r.strip().lower() for r in brackets[1:-1].split(",")]
-            rules = [r for r in rules if r]
-            if not rules:
-                malformed.append((line, "empty rule list in 'ignore[]'"))
-            elif any(not _RULE_ID_RE.match(r) for r in rules):
-                bad = next(r for r in rules if not _RULE_ID_RE.match(r))
-                malformed.append((line, f"'{bad}' is not a valid rule id"))
+            if marker.malformed is not None:
+                malformed.append((tok.start[0], marker.malformed))
             else:
-                suppressions[line] = frozenset(rules)
+                suppressions[tok.start[0]] = marker.rules
     except (tokenize.TokenError, SyntaxError, IndentationError):
         pass
     return suppressions, malformed
@@ -415,10 +586,10 @@ class FileContext:
     """Everything a rule needs to know about one parsed file. Rules all
     share one signature: check(ctx) -> (sites, passed, findings).
 
-    The `functions`, `sensitive_calls` and `tool_functions` views are cached
-    per file. Six rules asking the same three questions used to mean the
-    same subtrees were walked a dozen times over -- ast.walk is the whole
-    cost of a scan, and a rule should not have to know that to stay fast.
+    Every view is cached and derived from one walk of the tree (all_nodes):
+    the parent map, per-scope node buckets, the definition index, functions,
+    calls and sensitive calls. Reachability comes from `program`, the
+    scan-wide index, or from this file alone when there is none.
     """
 
     path: str
@@ -429,6 +600,13 @@ class FileContext:
     # (line, reason) for suppression comments that could not be parsed; they
     # grant no exemption and are reported as warnings by the scoring pass.
     malformed_suppressions: list[tuple[int, str]] = field(default_factory=list)
+    # Dotted module name, for resolving calls from other files.
+    module: str = ""
+    # Whole-scan reachability. None means "this file on its own".
+    program: "ProgramIndex | None" = None
+    _parent_map: dict[ast.AST, ast.AST] = field(default_factory=dict, repr=False)
+    _scope_buckets: dict[int, list[ast.AST]] = field(default_factory=dict, repr=False)
+    _direct_defs: dict[int, list[ast.stmt]] = field(default_factory=dict, repr=False)
 
     @classmethod
     def from_source(
@@ -436,43 +614,84 @@ class FileContext:
         source: str,
         path: str = "<memory>",
         config: RuleConfig | None = None,
+        module: str = "",
+        program: "ProgramIndex | None" = None,
     ) -> "FileContext":
         tree = ast.parse(source)
         suppressions, malformed = _parse_suppressions(source)
-        return cls(
+        ctx = cls(
             path=path,
             tree=tree,
-            import_aliases=build_import_aliases(tree),
             config=config if config is not None else RuleConfig(),
             suppressions=suppressions,
             malformed_suppressions=malformed,
+            module=module,
+            program=program,
         )
+        ctx.import_aliases = build_import_aliases(tree, ctx.all_nodes)
+        return ctx
+
+    @cached_property
+    def all_nodes(self) -> list[ast.AST]:
+        """Every node in the file in ast.walk order, from a single walk that
+        also builds the parent map. Rules filter this list instead of each
+        walking the tree again -- a tree walk is the whole cost of a scan."""
+        nodes: list[ast.AST] = []
+        parents: dict[ast.AST, ast.AST] = {}
+        buckets: dict[int, list[ast.AST]] = {}
+        defs: dict[int, list[ast.stmt]] = {}
+        definers = (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)
+        # (node, enclosing function scope, nearest enclosing def-or-class)
+        queue: deque[tuple[ast.AST, ast.AST, ast.AST]] = deque(
+            [(self.tree, self.tree, self.tree)]
+        )
+        while queue:
+            node, scope, container = queue.popleft()
+            nodes.append(node)
+            buckets.setdefault(id(scope), []).append(node)
+            for child in ast.iter_child_nodes(node):
+                parents[child] = node
+                child_scope = (
+                    child if isinstance(child, (ast.FunctionDef, ast.AsyncFunctionDef))
+                    else scope
+                )
+                if isinstance(child, definers):
+                    defs.setdefault(id(container), []).append(child)
+                    child_container: ast.AST = child
+                else:
+                    child_container = container
+                queue.append((child, child_scope, child_container))
+        self._parent_map = parents
+        self._scope_buckets = buckets
+        self._direct_defs = defs
+        return nodes
+
+    def direct_defs(self, container: ast.AST) -> list[ast.stmt]:
+        """Functions and classes defined directly inside `container` (the
+        module, a class or a function), however deeply nested in if/try/with
+        blocks, without descending into other definitions. Source order."""
+        self.all_nodes  # noqa: B018 -- builds the index as a side effect
+        found = self._direct_defs.get(id(container), [])
+        return sorted(found, key=lambda n: (n.lineno, n.col_offset))
+
+    def scope_nodes(self, scope: ast.AST) -> list[ast.AST]:
+        """The same nodes iter_scope(scope) yields, precomputed: `scope`
+        itself and everything executing in it, nested defs excluded."""
+        self.all_nodes  # noqa: B018 -- builds the buckets as a side effect
+        return self._scope_buckets.get(id(scope), [scope])
 
     @cached_property
     def parents(self) -> dict[ast.AST, ast.AST]:
-        """Node -> parent, built on first use.
-
-        Every question that needs it ("what function encloses this call?",
-        "is this call in a try body?") starts from a sensitive call, so a
-        file with no sinks -- most files in most repos -- never builds it.
-        That saves both a full tree walk and a dict entry per AST node,
-        which is the largest single allocation a scan makes.
-        """
-        return build_parent_map(self.tree)
+        """Node -> parent (AST nodes carry no parent pointer)."""
+        self.all_nodes  # noqa: B018 -- builds the parent map as a side effect
+        return self._parent_map
 
     @cached_property
     def _defs_and_calls(self) -> tuple[list["FunctionNode"], list[ast.Call]]:
-        """Every def/async def and every Call in the file, from one walk.
-
-        `functions` and `sensitive_calls` are both wanted by nearly every
-        scan, and each used to walk the whole tree for itself. Binning both
-        node types in a single pass halves that; the lists hold references
-        to nodes the tree already owns, so the extra memory is one pointer
-        per def and per call, not a copy of anything.
-        """
-        functions: list["FunctionNode"] = []
+        """Every def/async def and every Call in the file, in walk order."""
+        functions: list[FunctionNode] = []
         calls: list[ast.Call] = []
-        for node in ast.walk(self.tree):
+        for node in self.all_nodes:
             if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
                 functions.append(node)
             elif isinstance(node, ast.Call):
@@ -485,36 +704,125 @@ class FileContext:
         return self._defs_and_calls[0]
 
     @cached_property
-    def sensitive_calls(self) -> list[tuple[ast.Call, str]]:
-        """Every (call, action label) pair in the file, alias-resolved."""
+    def string_constants(self) -> dict[str, str]:
+        """Names bound only to string literals (see build_string_constants)."""
+        return build_string_constants(self.tree, self.all_nodes)
+
+    @cached_property
+    def candidate_sensitive_calls(self) -> list[tuple[ast.Call, str]]:
+        """Every call whose name or arguments look sensitive, alias-resolved,
+        before cross-file resolution (see sensitive_calls)."""
         aliases = self.import_aliases
+        constants = self.string_constants
         return [
             (call, label)
             for call in self._defs_and_calls[1]
-            if (label := sensitive_label(call, aliases)) is not None
+            if (label := sensitive_label(call, aliases, constants)) is not None
         ]
 
     @cached_property
-    def tool_functions(self) -> set["FunctionNode"]:
-        """The functions held to tool-governance standards (rules 2, 3, 5).
+    def sensitive_calls(self) -> list[tuple[ast.Call, str]]:
+        """The sensitive calls the rules judge. A call that resolves to a
+        function in the scanned code -- `ops.remove_file(path)` where ops.py
+        defines remove_file -- is not itself a sink: the sinks inside that
+        function are judged where they are, and reporting the call site as
+        well would count the same risk twice."""
+        resolved = self.index.resolved_sites
+        if not resolved:
+            return self.candidate_sensitive_calls
+        return [
+            (call, label) for call, label in self.candidate_sensitive_calls
+            if (self.path, call.lineno, call.col_offset) not in resolved
+        ]
 
-        Same population as is_tool_function() over every function, computed
-        the other way round: rather than re-scanning each function's subtree
-        for sinks, walk up from each known sink and mark the functions
-        enclosing it. O(sinks x depth) instead of O(functions x size), and
-        the sink list is already cached.
-        """
-        tools = {
-            fn for fn in self.functions
-            if has_tool_decorator(fn, self.import_aliases)
-        }
-        for call, _label in self.sensitive_calls:
-            node = self.parents.get(call)
-            while node is not None:
-                if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
-                    tools.add(node)
-                node = self.parents.get(node)
-        return tools
+    @cached_property
+    def sensitive_call_ids(self) -> frozenset[int]:
+        return frozenset(id(call) for call, _label in self.candidate_sensitive_calls)
+
+    def is_sensitive(self, call: ast.Call) -> bool:
+        return id(call) in self.sensitive_call_ids
+
+    def enclosing_scope(self, node: ast.AST) -> ast.AST:
+        """The function a node executes in, or the module tree."""
+        fn = enclosing_function(node, self.parents)
+        return fn if fn is not None else self.tree
+
+    @cached_property
+    def approval(self) -> "ApprovalAnalyzer":
+        """Approval-dominance analysis for this file (see approval.py)."""
+        from agentgauge.approval import ApprovalAnalyzer
+
+        return ApprovalAnalyzer(
+            self.tree,
+            self.parents,
+            self.import_aliases,
+            self.config.approval_markers,
+            self.is_sensitive,
+            self.scope_nodes,
+        )
+
+    @cached_property
+    def index(self) -> "ProgramIndex":
+        """Reachability facts: the scan-wide index if one was supplied,
+        otherwise one built from this file alone."""
+        if self.program is not None:
+            return self.program
+        from agentgauge.callgraph import ProgramIndex, summarize
+
+        module = self.module or self.path.rsplit("/", 1)[-1].removesuffix(".py")
+        return ProgramIndex.build(
+            [summarize(self, module)], self.config.scope, self.config.entry_points
+        )
+
+    def key(self, fn: "FunctionNode") -> tuple[str, int, int]:
+        return (self.path, fn.lineno, fn.col_offset)
+
+    def is_entry(self, fn: "FunctionNode") -> bool:
+        """True if the model can call this function directly."""
+        return self.key(fn) in self.index.entries
+
+    def in_scope(self, fn: "FunctionNode | None") -> bool:
+        """True if code in `fn` (None: module level) is judged at all. With
+        scope = "tools" that is code reachable from a tool entry point."""
+        if self.index.scope == "all":
+            return True
+        return fn is not None and self.key(fn) in self.index.reachable
+
+    def is_gated(self, fn: "FunctionNode") -> bool:
+        """True if every reachable call path into `fn` passes an approval
+        check (or `fn` has an approval decorator)."""
+        return self.key(fn) in self.index.gated
+
+    def is_protected(self, fn: "FunctionNode") -> bool:
+        """True if every reachable call into `fn` sits in a try body whose
+        handler deals with the failure."""
+        return self.key(fn) in self.index.protected
+
+    def logs_via_calls(self, fn: "FunctionNode") -> bool:
+        return self.key(fn) in self.index.logs_closure
+
+    def rate_limited_via_calls(self, fn: "FunctionNode") -> bool:
+        return self.key(fn) in self.index.rate_closure
+
+    def qualname(self, fn: "FunctionNode | None") -> str | None:
+        if fn is None:
+            return None
+        return self.index.qualnames.get(self.key(fn), fn.name)
+
+    @cached_property
+    def tool_functions(self) -> set["FunctionNode"]:
+        """Tool entry points in this file: the functions held to
+        tool-governance standards by rules 2, 3 and 5."""
+        entries = self.index.entries
+        return {fn for fn in self.functions if self.key(fn) in entries}
+
+    @cached_property
+    def out_of_scope_sensitive_calls(self) -> int:
+        """Sensitive calls not reachable from any tool, so not judged."""
+        return sum(
+            1 for call, _label in self.sensitive_calls
+            if not self.in_scope(enclosing_function(call, self.parents))
+        )
 
     def is_suppressed(self, rule: str, line: int) -> bool:
         """True if an `# agentgauge: ignore` comment on this line covers
@@ -544,9 +852,7 @@ def iter_identifiers(scope: ast.AST) -> Iterator[str]:
             yield node.attr
         elif isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
             yield node.name
-        elif isinstance(node, ast.arg):
-            yield node.arg
-        elif isinstance(node, ast.keyword) and node.arg is not None:
+        elif isinstance(node, (ast.arg, ast.keyword)) and node.arg is not None:
             yield node.arg
 
 
@@ -555,28 +861,3 @@ def name_tokens(name: str) -> set[str]:
     'audit_log' -> {'audit', 'log'}; 'logger.info' -> {'logger', 'info'}.
     Token matching avoids substring accidents like 'log' inside 'login'."""
     return {t for t in re.split(r"[._]", name.lower()) if t}
-
-
-def has_tool_decorator(
-    fn: FunctionNode, aliases: dict[str, str] | None = None
-) -> bool:
-    """True if any decorator names a tool (@mcp.tool(), @tool, @app.tool)."""
-    for dec in fn.decorator_list:
-        target = dec.func if isinstance(dec, ast.Call) else dec
-        name = dotted_name(target, aliases)
-        if name is not None and "tool" in name_tokens(name):
-            return True
-    return False
-
-
-def is_tool_function(fn: FunctionNode, aliases: dict[str, str] | None = None) -> bool:
-    """A "tool function" is what per-function governance rules apply to:
-    either it is decorated as a tool (@mcp.tool(), @tool, ...) or it
-    performs a sensitive action itself.
-
-    Rules should prefer FileContext.tool_functions, which answers this for
-    every function in the file at once without re-walking subtrees.
-    test_astutils pins the two to the same answer."""
-    if has_tool_decorator(fn, aliases):
-        return True
-    return next(iter_sensitive_calls(fn, aliases), None) is not None

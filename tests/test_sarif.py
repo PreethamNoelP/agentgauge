@@ -16,7 +16,7 @@ def test_sarif_has_one_rule_descriptor_per_registered_rule():
 
 
 def test_sarif_result_maps_critical_finding_to_error_level():
-    report = score_contexts([ctx("def wipe(path):\n    shutil.rmtree(path)\n")])
+    report = score_contexts([ctx("@mcp.tool()\ndef wipe(path):\n    shutil.rmtree(path)\n")])
     sarif = build_sarif(report)
     results = sarif["runs"][0]["results"]
     oversight_result = next(r for r in results if r["ruleId"] == "human-oversight")
@@ -61,7 +61,12 @@ def test_sarif_run_properties_carry_score_and_verdict():
         "totalSites": 0,
         "suppressed": 0,
         "criticalSuppressed": 0,
+        "acceptedRisks": 0,
         "criticalGateActive": True,
+        "minScore": None,
+        "scope": "tools",
+        "toolEntryPoints": 0,
+        "outOfScopeSensitiveCalls": 0,
     }
 
 
@@ -103,7 +108,7 @@ def test_sarif_invocation_reports_skipped_files():
 
 def test_sarif_invocation_reports_scan_warnings():
     report = score_contexts(
-        [ctx("import shutil\ndef f(p):\n    shutil.rmtree(p)\n")],
+        [ctx("import shutil\n@mcp.tool()\ndef f(p):\n    shutil.rmtree(p)\n")],
         disabled_rules=frozenset({"human-oversight"}),
     )
 
@@ -122,3 +127,67 @@ def test_sarif_records_the_config_source_when_there_is_one():
 
     assert with_config["properties"] == {"configSource": "pyproject.toml"}
     assert "properties" not in without
+
+
+# --- code-scanning ergonomics -------------------------------------------------
+
+WIPE = "import shutil\n@mcp.tool()\ndef wipe(path):\n    shutil.rmtree(path)\n"
+
+
+def _results(src: str, **kw):
+    return build_sarif(score_contexts([ctx(src)], **kw))["runs"][0]["results"]
+
+
+def test_fingerprints_survive_an_unrelated_edit_above_the_finding():
+    before = {r["partialFingerprints"]["agentgauge/v1"] for r in _results(WIPE)}
+    after = {
+        r["partialFingerprints"]["agentgauge/v1"]
+        for r in _results("# a new comment\n\n" + WIPE)
+    }
+    assert before and before == after
+
+
+def test_identical_findings_get_distinct_fingerprints():
+    src = (
+        "@mcp.tool()\ndef t():\n"
+        "    while True:\n        pass\n"
+        "    while True:\n        pass\n"
+    )
+    prints = [
+        r["partialFingerprints"]["agentgauge/v1"]
+        for r in _results(src) if "while True" in r["message"]["text"]
+    ]
+    assert len(prints) == 2 and len(set(prints)) == 2
+
+
+def test_results_carry_column_and_function():
+    result = next(r for r in _results(WIPE) if r["ruleId"] == "human-oversight")
+    location = result["locations"][0]
+    assert location["physicalLocation"]["region"] == {"startLine": 4, "startColumn": 5}
+    assert location["logicalLocations"][0]["fullyQualifiedName"] == "wipe"
+
+
+def test_rule_descriptors_carry_help_links_and_security_severity():
+    driver = build_sarif(score_contexts([ctx("x = 1\n")]))["runs"][0]["tool"]["driver"]
+    for rule in driver["rules"]:
+        assert rule["helpUri"].endswith(f"RULES.md#{rule['id']}")
+        assert float(rule["properties"]["security-severity"]) > 0
+    oversight = next(r for r in driver["rules"] if r["id"] == "human-oversight")
+    assert float(oversight["properties"]["security-severity"]) >= 9.0
+
+
+def test_inline_suppressions_are_recorded_not_dropped():
+    src = WIPE.replace("shutil.rmtree(path)", "shutil.rmtree(path)  # agentgauge: ignore[error-handling]")
+    suppressed = [r for r in _results(src) if "suppressions" in r]
+    assert [r["ruleId"] for r in suppressed] == ["error-handling"]
+    assert suppressed[0]["suppressions"][0]["kind"] == "inSource"
+
+
+def test_accepted_risks_are_external_suppressions_with_their_reason():
+    from agentgauge.config import AcceptedRisk
+
+    risk = AcceptedRisk(rule="human-oversight", file="mem.py", reason="reviewed in SEC-123")
+    accepted = [r for r in _results(WIPE, accepted_risks=(risk,)) if "suppressions" in r]
+    assert accepted[0]["suppressions"][0] == {
+        "kind": "external", "status": "accepted", "justification": "reviewed in SEC-123"
+    }

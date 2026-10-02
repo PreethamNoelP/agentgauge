@@ -13,8 +13,8 @@ the code it reads.
 
 | File | Must score | Purpose |
 |---|---|---|
-| `vulnerable_server.py` | exactly **0.0 / 100**, verdict `FAIL_CRITICAL` | Every rule must fire. Each shape in it is one that a previous version of agentgauge scored as clean. |
-| `clean_server.py` | exactly **100.0 / 100**, zero findings | The false-positive canary. Legitimate governance patterns must never be flagged. |
+| `vulnerable_server.py` | exactly **0.0 / 100** over 123 sites, verdict `FAIL_CRITICAL` | Every rule must fire. Each tool is a shape some version of agentgauge, or an obvious implementation of it, scored as clean — including every approval bypass (check after the sink, model-supplied `confirm`, authorization, constants, lookalikes). |
+| `clean_server.py` | exactly **100.0 / 100** over 48 sites, zero findings | The false-positive canary: approval through MCP elicitation, helpers gated and protected at their call sites, input models, low-level dispatch. Legitimate governance patterns must never be flagged. |
 
 Both numbers are asserted in `tests/test_integration.py` and gated in CI, so
 a detection regression fails the build rather than quietly passing.
@@ -22,8 +22,10 @@ a detection regression fails the build rather than quietly passing.
 ## Why `vulnerable_server.py` looks alarming
 
 It contains `eval()`, `pickle.loads()`, `subprocess.run(..., shell=True)`,
-`asyncio.create_subprocess_shell()`, unguarded `shutil.rmtree()`, and a
-module-level `subprocess.check_call()`. That is the point: a scanner for
+`asyncio.create_subprocess_shell()`, model-written SQL, Stripe refunds over
+raw HTTP and unguarded `shutil.rmtree()`. Its one module-level
+`subprocess.check_call()` is not reachable from any tool and must be
+reported as out of scope, not judged. That is the point: a scanner for
 ungoverned agent tool-calling code needs a specimen of ungoverned agent
 tool-calling code.
 
@@ -45,9 +47,10 @@ Consequences worth knowing:
 - If the rule can also *pass*, add the governed equivalent to
   `clean_server.py`; confirm it still scores exactly `100.0` with zero
   findings.
-- Reference the shape by name in
+- Make it its own `@mcp.tool()` function and add the function's name to
   `test_vulnerable_fixture_covers_every_detection_shape`, so a regression
-  names what broke instead of just moving a number.
+  names what broke instead of just moving a number. Code no tool reaches is
+  not judged.
 - Keep both files importable-looking but never actually importable as a
   server — undefined names like `mcp`, `logger` and `request_approval` are
   intentional. A parser does not need them to exist.

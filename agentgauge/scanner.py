@@ -10,10 +10,10 @@ verdict INCOMPLETE so a partial view never looks like a full pass.
 
 import os
 import tokenize
+from collections.abc import Callable, Iterator
 from pathlib import Path
-from typing import Callable, Iterator
 
-from agentgauge import configscan
+from agentgauge import callgraph, configscan
 from agentgauge.astutils import FileContext
 from agentgauge.config import Config
 from agentgauge.fswalk import MAX_FILE_BYTES, SKIP_DIRS, is_excluded
@@ -21,8 +21,12 @@ from agentgauge.rules import defaults
 from agentgauge.scoring import ScanReport, score_contexts
 
 __all__ = [
-    "MAX_FILE_BYTES", "SKIP_DIRS", "is_excluded",
-    "iter_python_files", "escapes_scan_root", "scan",
+    "MAX_FILE_BYTES",
+    "SKIP_DIRS",
+    "escapes_scan_root",
+    "is_excluded",
+    "iter_python_files",
+    "scan",
 ]
 
 
@@ -134,7 +138,32 @@ def _read_source(path: Path) -> str:
         return fh.read()
 
 
+# Parsed files are kept between the two passes while their total source
+# size stays under this; past it, pass 2 re-parses each file, so memory
+# stays bounded by one file's AST however large the repository is. A kept
+# file costs roughly 40x its source size (measured: 2.7 MB of source peaks
+# at ~104 MB kept, ~17 MB re-parsed), so 8 MB of source is ~300 MB.
+REUSE_PARSED_BYTES = 8_000_000
+
+
+def module_name(path: Path, root: Path) -> tuple[str, bool]:
+    """Dotted module name for a file, relative to the scan root, and whether
+    it is a package's __init__."""
+    rel = Path(path.name) if root.is_file() else path.relative_to(root)
+    parts = list(rel.with_suffix("").parts)
+    is_package = bool(parts) and parts[-1] == "__init__"
+    if is_package:
+        parts = parts[:-1]
+    return ".".join(parts), is_package
+
+
 def scan(target: str | Path, config: Config | None = None) -> ScanReport:
+    """Scan a file or directory.
+
+    Two passes. The first summarizes every file (tool entry points, call
+    edges, logging) into a ProgramIndex, so reachability crosses files; the
+    second runs the rules against that index.
+    """
     root = Path(target)
     config = config if config is not None else Config()
     cwd = Path(os.path.abspath(os.curdir))
@@ -145,61 +174,94 @@ def scan(target: str | Path, config: Config | None = None) -> ScanReport:
         nonlocal excluded
         excluded += 1
 
+    paths = list(iter_python_files(root, config.exclude, count_excluded))
+
+    def parse(path: Path, rel: str, note: Callable[[str], None] | None) -> FileContext | None:
+        module, _is_package = module_name(path, root)
+        try:
+            return FileContext.from_source(
+                _read_source(path), path=rel, config=config.rules, module=module
+            )
+        except SyntaxError as exc:
+            where = f" at line {exc.lineno}" if exc.lineno else ""
+            reason = f"syntax error{where} ({exc.msg})"
+        except RecursionError:
+            reason = "too deeply nested to parse"
+        except MemoryError:
+            reason = "ran out of memory while parsing"
+        # ValueError: NUL bytes or the size guard. LookupError: a PEP 263
+        # declaration naming an unknown encoding. Both are reachable from any
+        # untrusted repository and neither should end the scan.
+        except (OSError, UnicodeDecodeError, ValueError, LookupError) as exc:
+            reason = f"unreadable ({exc})"
+        if note is not None:
+            note(reason)
+        return None
+
+    def refused(path: Path) -> bool:
+        # An explicitly named target is never second-guessed.
+        return not root.is_file() and escapes_scan_root(path, root)
+
+    # Pass 1: summaries for cross-file reachability.
+    summaries = []
+    kept: dict[Path, FileContext] = {}
+    kept_bytes = 0
+    for path in paths:
+        if refused(path):
+            continue
+        rel = _display_path(path, root, cwd)
+        ctx = parse(path, rel, None)
+        if ctx is None:
+            continue
+        _module, is_package = module_name(path, root)
+        summaries.append(callgraph.summarize(ctx, ctx.module, is_package))
+        try:
+            size = path.stat().st_size
+        except OSError:
+            size = REUSE_PARSED_BYTES
+        if kept_bytes + size <= REUSE_PARSED_BYTES:
+            kept[path] = ctx
+            kept_bytes += size
+    program = callgraph.ProgramIndex.build(
+        summaries, config.rules.scope, config.rules.entry_points
+    )
+    del summaries
+
     def iter_contexts() -> Iterator[FileContext]:
-        for path in iter_python_files(root, config.exclude, count_excluded):
+        for path in paths:
             rel = _display_path(path, root, cwd)
 
-            def note(reason: str) -> None:
-                # Some exception messages (notably "unknown encoding for
-                # <path>") embed the absolute path, which would make the
-                # report differ between machines for the same commit. The
-                # entry already names the file relatively.
+            def note(reason: str, path: Path = path, rel: str = rel) -> None:
+                # Some messages ("unknown encoding for <path>") embed the
+                # absolute path; report the same text on every machine.
                 skipped.append(f"{rel}: {_relativize(reason, path, rel)}")
 
-            # Checked here rather than in iter_python_files so the refusal is
-            # reported rather than silent: a file we declined to read is a
-            # hole in coverage, which is exactly what INCOMPLETE is for.
-            # An explicitly named target is the caller's own choice and is
-            # never second-guessed, the same way exclude patterns aren't
-            # allowed to overrule it.
-            if not root.is_file() and escapes_scan_root(path, root):
+            # A file we declined to read is a hole in coverage, which is
+            # what INCOMPLETE is for -- so the refusal is reported.
+            if refused(path):
                 note(
                     "symlink not followed (target is outside the scan root, "
                     "or could not be resolved)"
                 )
                 continue
-
-            try:
-                ctx = FileContext.from_source(
-                    _read_source(path), path=rel, config=config.rules
-                )
-            except SyntaxError as exc:
-                where = f" at line {exc.lineno}" if exc.lineno else ""
-                note(f"syntax error{where} ({exc.msg})")
-            except RecursionError:
-                note("too deeply nested to parse")
-            except MemoryError:
-                note("ran out of memory while parsing")
-            # ValueError: source containing NUL bytes (and the size guard
-            # above). LookupError: a PEP 263 declaration naming an encoding
-            # this interpreter does not have. Both are reachable from any
-            # untrusted repository and neither should end the scan.
-            except (OSError, UnicodeDecodeError, ValueError, LookupError) as exc:
-                note(f"unreadable ({exc})")
-            else:
+            ctx = kept.pop(path, None) or parse(path, rel, note)
+            if ctx is not None:
+                ctx.program = program
+                ctx.__dict__.pop("index", None)
                 yield ctx
 
-    report = score_contexts(iter_contexts(), disabled_rules=config.rules.disabled_rules)
+    report = score_contexts(
+        iter_contexts(),
+        disabled_rules=config.rules.disabled_rules,
+        accepted_risks=config.accepted_risks,
+        scope=config.rules.scope,
+    )
     report.skipped = skipped
+    report.min_score = config.min_score
 
-    # JSON config-file scanning (claude_desktop_config.json, mcp.json, ...):
-    # the same governance question as the AST "Permissive defaults" rule,
-    # merged into the same CategoryResult rather than a category of its
-    # own -- see configscan.py's module docstring. Skipped entirely if that
-    # rule was disabled: there is then no category to merge into, and a
-    # disabled rule must mean "we didn't look", not "we looked and it's
-    # fine" (the same reasoning score_contexts already applies to the AST
-    # rule via CRITICAL_GATE_RULES/gate_disabled).
+    # MCP client config files feed the "Permissive defaults" category (see
+    # configscan.py). Skipped when that rule is disabled: a disabled rule
+    # means "we didn't look", not "we looked and it's fine".
     defaults_category = next(
         (c for c in report.categories if c.name == defaults.CATEGORY), None
     )
@@ -227,12 +289,8 @@ def scan(target: str | Path, config: Config | None = None) -> ScanReport:
             defaults_category.findings.extend(findings)
         report.config_files_scanned = config_files_scanned
 
-    # Assigned after both walks have finished, so the count is final. Unlike
-    # `skipped` this does not make the verdict INCOMPLETE: excluding files
-    # is a deliberate project decision, not a gap in coverage agentgauge hit
-    # by accident. It only has to be *visible* -- and when an exclude
-    # pattern does hide everything that mattered, the resulting zero-site
-    # scan is INCOMPLETE on its own merits.
+    # Excluding files is a project decision, not a coverage gap, so it does
+    # not make the verdict INCOMPLETE -- but it is always reported.
     report.excluded = excluded
     if excluded:
         report.warnings.append(

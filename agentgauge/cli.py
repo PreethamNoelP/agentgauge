@@ -1,22 +1,18 @@
 """Command-line interface: `agentgauge <path> [--json|--sarif] [--min-score N]`.
 
 Exit codes are the contract for CI:
-  0  scan completed, met --min-score (if given), no critical failures, and
-     (if --baseline was given) nothing new since the baseline
-  1  score below --min-score, OR the verdict is FAIL_CRITICAL -- a single
-     ungated critical action (payment, file delete, shell exec, ...) fails
-     the build regardless of --min-score or how high the aggregate score is
-     -- OR the verdict is INCOMPLETE and --fail-on-incomplete was passed --
-     OR --baseline was given and a finding not already in it appeared (a
-     baseline never suppresses the two checks above it in this list: it is
-     an additional gate, not a replacement for either)
-  2  bad invocation (target missing, no Python or MCP config files actually
-     scanned, an explicit/discovered [tool.agentgauge] config file is
-     malformed, --update-baseline was passed without --baseline, or
-     --baseline names a file that exists but isn't a valid baseline)
+  0  verdict is PASS, or INCOMPLETE without --fail-on-incomplete, and (with
+     --baseline) nothing new since the baseline
+  1  verdict is FAIL_CRITICAL (an agent-reachable critical action with no
+     approval check before it) or FAIL_SCORE (score below --min-score /
+     min_score, default 70); OR the verdict is INCOMPLETE and
+     --fail-on-incomplete was passed; OR --baseline found a new finding
+  2  bad invocation: target missing, nothing scanned, a malformed config or
+     baseline file, --update-baseline without --baseline
 """
 
 import argparse
+import dataclasses
 import json
 import os
 import sys
@@ -29,7 +25,7 @@ from agentgauge.baseline import (
     load_baseline,
     write_baseline,
 )
-from agentgauge.config import ConfigError, load_config
+from agentgauge.config import SCOPES, ConfigError, load_config
 from agentgauge.sarif import build_sarif
 from agentgauge.scanner import scan
 from agentgauge.scoring import ScanReport
@@ -104,6 +100,17 @@ def _print_report(
     # number and completely different claims; printing only the number let
     # the first pass for the second.
     print(f"  {'APPLICABLE SITES':<34}{report.total_sites}")
+    if report.min_score is not None:
+        print(f"  {'PASS THRESHOLD':<34}{report.min_score:g}")
+    if report.scope == "tools":
+        print(f"  {'TOOL ENTRY POINTS':<34}{len(report.tool_functions)}")
+        if report.out_of_scope_sensitive_calls:
+            print(
+                f"  {'NOT AGENT-REACHABLE':<34}{report.out_of_scope_sensitive_calls}"
+                " sensitive call(s), not judged"
+            )
+    else:
+        print(f"  {'SCOPE':<34}all code")
     if report.excluded:
         print(f"  {'EXCLUDED BY CONFIG':<34}{report.excluded} file(s)")
 
@@ -114,6 +121,14 @@ def _print_report(
             f"  ({report.critical_suppressed} suppressed finding(s) were critical -- "
             "still counted toward FAIL_CRITICAL; suppression cannot buy back the verdict)"
         )
+
+    if report.accepted:
+        print(f"\nAccepted risks ({len(report.accepted)}):")
+        for a in report.accepted:
+            f = a.finding
+            print(f"\n  {_safe(f.file)}:{f.line}  [{f.rule}]")
+            print(f"    {_safe(f.message)}")
+            print(f"    accepted: {_safe(a.reason)}")
 
     if baseline_written is not None:
         print(f"  (baseline updated: {baseline_written} finding(s) written)")
@@ -172,8 +187,22 @@ def _build_parser() -> argparse.ArgumentParser:
         type=float,
         default=None,
         metavar="N",
-        help="exit with code 1 if the governance score is below N "
-             "(overrides [tool.agentgauge] min_score if both are set)",
+        help="the score a PASS needs; below it the verdict is FAIL_SCORE "
+             "(default 70, or [tool.agentgauge] min_score; 0 disables)",
+    )
+    parser.add_argument(
+        "--scope",
+        choices=SCOPES,
+        default=None,
+        help="'tools' (default) judges only code reachable from a recognized "
+             "tool entry point; 'all' treats every function that performs a "
+             "sensitive action as a tool (overrides [tool.agentgauge] scope)",
+    )
+    parser.add_argument(
+        "--ignore-accepted-risks",
+        action="store_true",
+        help="judge findings covered by [tool.agentgauge] accepted_risks as "
+             "if those entries did not exist",
     )
     parser.add_argument(
         "--fail-on-incomplete",
@@ -263,6 +292,18 @@ def main(argv: list[str] | None = None) -> int:
         print(f"agentgauge: {exc}", file=sys.stderr)
         return 2
 
+    if args.scope is not None:
+        config = dataclasses.replace(
+            config, rules=dataclasses.replace(config.rules, scope=args.scope)
+        )
+    if args.ignore_accepted_risks:
+        config = dataclasses.replace(config, accepted_risks=())
+    if args.min_score is not None:
+        if not 0 <= args.min_score <= 100:
+            print("agentgauge: --min-score must be between 0 and 100", file=sys.stderr)
+            return 2
+        config = dataclasses.replace(config, min_score=args.min_score)
+
     report = scan(target, config=config)
 
     if report.files_scanned == 0 and report.config_files_scanned == 0:
@@ -306,17 +347,12 @@ def main(argv: list[str] | None = None) -> int:
 
     _emit(report, args, config.source, baseline_written)
 
-    min_score = args.min_score if args.min_score is not None else config.min_score
-
-    if report.verdict == "FAIL_CRITICAL":
+    verdict = report.verdict
+    if verdict in ("FAIL_CRITICAL", "FAIL_SCORE"):
         return 1
-    if min_score is not None and report.score < min_score:
+    if args.fail_on_incomplete and verdict == "INCOMPLETE":
         return 1
-    if args.fail_on_incomplete and report.verdict == "INCOMPLETE":
-        return 1
-    # A baseline never suppresses FAIL_CRITICAL or --min-score above -- both
-    # already returned by this point if triggered. This is the baseline's
-    # own, additional gate: something not already accounted for appeared.
+    # The baseline is an additional gate; it never relaxes the ones above.
     if report.baseline_applied and report.baseline_new:
         return 1
     return 0

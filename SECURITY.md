@@ -27,19 +27,20 @@ not ordinary bugs:
    reach a terminal (`cli._safe`); JSON and SARIF are serialized by
    `json.dumps`. A path from scanned input to raw terminal control
    sequences, or to JSON/SARIF a consumer misparses, is in scope.
-5. **Silently weakening the gate.** A way to make an ungated critical sink
-   report `PASS` — through config, a suppression comment, or a parse
-   failure that is not reported — is treated as a security issue. That
-   verdict is the one guarantee this tool makes; see
-   `ScanReport.verdict`.
+5. **Silently weakening the gate.** A way to make an agent-reachable
+   critical sink stop producing `FAIL_CRITICAL` through anything other than
+   a fix or a visible `accepted_risks` entry is a security issue: an inline
+   suppression, a baseline, a config key or vocabulary entry (for example
+   one that lets a sink count as its own approval), an unreported parse
+   failure, or a way to make agentgauge report a confident `PASS` over code
+   it never examined. `accepted_risks` is the one sanctioned exception, and
+   it is printed with its reason in every report.
 
-   This includes making agentgauge report a confident `PASS` over code it
-   never actually examined. A scan with zero applicable sites is
-   `INCOMPLETE` for that reason: previously an `exclude` pattern covering
-   the only file with sinks produced a 100.0/100 `PASS` and exit `0` under
-   `--min-score 100 --fail-on-incomplete`. No warning a CI consumer reads
-   is a substitute for the exit code, so "the warning was on stderr" does
-   not close a report of this shape.
+   An approval shape that RULES.md says is *not* accepted — a check after
+   the sink, a tool argument, a constant, a permissive flag — but that
+   nevertheless passes is in scope too. A shape RULES.md lists as a known
+   limit (approval polarity, dispatch through a dict) is a false negative:
+   please report it as a normal issue.
 
 ## What does not count
 
@@ -57,17 +58,17 @@ Stated precisely, because the whole point of this tool is that you point it
 at code you cannot afford to leak:
 
 - **Nothing is transmitted.** The package's complete import list is
-  `argparse, ast, dataclasses, fnmatch, functools, io, json, os, pathlib,
-  re, sys, tokenize, tomllib, typing`. No HTTP client, no socket, no DNS,
-  no telemetry, no update check.
-- **Nothing is written.** The only file-opening calls in the package are
-  `tokenize.open` (read), `path.open("rb")` for the config file (read), and
-  `os.devnull` when stdout's pipe closes. No temp files, no cache, no
-  persistence of any kind — a scan leaves the filesystem exactly as it was.
+  `argparse, ast, collections, dataclasses, fnmatch, functools, hashlib, io, json, os, pathlib, re, sys, tokenize, tomllib, typing`.
+  No HTTP client, no socket, no DNS, no telemetry, no update check.
+- **Nothing is written, except what you ask for.** A scan leaves the
+  filesystem exactly as it was. The one write in the package is
+  `--update-baseline PATH`, which writes the baseline file you named. No
+  temp files, no cache.
 - **Nothing is executed.** `ast.parse` and `tokenize` only. Scanned code is
   never imported, `eval`'d, `exec`'d, or run as a subprocess.
-- **Nothing outside the target is read.** `.py` files under the path you
-  name, plus one config file. Symlinks resolving outside the scan root are
+- **Nothing outside the target is read.** `.py` files and known MCP client
+  config files under the path you name, plus one config file and, with
+  `--baseline`, the baseline file. Symlinks resolving outside the scan root are
   refused rather than followed.
 - **The environment is never read.** No `os.environ`, no `getenv`, no
   credential helpers.

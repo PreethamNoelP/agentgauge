@@ -1,3 +1,5 @@
+import pytest
+
 from agentgauge.astutils import FileContext
 from agentgauge.config import RuleConfig
 from agentgauge.rules import defaults
@@ -87,12 +89,19 @@ def test_dict_literal_safe_flag_passes():
 
 
 def test_dict_with_a_computed_key_is_not_a_site():
-    sites, passed, findings = run("SERVER = {key: True}\n")
+    sites, passed, _findings = run("SERVER = {key: True}\n")
     assert (sites, passed) == (0, 0)
 
 
 def test_nested_dict_flag_is_still_found():
-    sites, passed, findings = run(
+    sites, passed, _findings = run(
         'CONFIG = {"tools": {"shell": {"skip_confirmation": True}}}\n'
     )
     assert (sites, passed) == (1, 0)
+
+
+@pytest.mark.parametrize("flag", ["verify_ssl_certs", "check_hostname", "validate_certs"])
+def test_tls_verification_flags_set_false_are_permissive(flag):
+    sites, passed, _ = run(f"client = make({flag}=False)\n")
+    assert (sites, passed) == (1, 0)
+

@@ -14,6 +14,8 @@ class Finding:
     message: str   # what is wrong, in plain language
     fix: str       # the concrete change that would clear this finding
     critical: bool = False  # True if this alone must fail CI, independent of score
+    column: int = 0         # 1-based column of the offending code, 0 if unknown
+    function: str | None = None  # qualified name of the enclosing function
 
 
 @dataclass

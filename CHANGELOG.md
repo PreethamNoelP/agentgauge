@@ -8,7 +8,101 @@ scanner, "breaking" includes anything that can change a repository's score
 or verdict, since that is what CI gates on — those are called out
 explicitly.
 
-## [Unreleased]
+## [0.2.0] — unreleased
+
+Everything in this section changes scores and verdicts. Most repositories
+will see different results; the reasons are listed in order of impact.
+
+### Changed — what is judged (breaking)
+
+- **Only agent-reachable code is judged.** Tool entry points are found from
+  tool decorators, registration by reference (`add_tool`, `Tool(func=...)`,
+  `FunctionTool.from_defaults`, `tools=[...]`, `TOOLS` tables), class-based
+  tools and config, and a two-pass scan follows their calls across files
+  (absolute and relative imports, `self.` methods, constructors,
+  callbacks). Sinks nothing reaches are counted as
+  `out_of_scope_sensitive_calls` and not judged. Previously every sink in a
+  repository was an agent action: `pip`, `requests` and `black` all failed
+  critical on their own cache and build code; they now report zero
+  critical findings. `scope = "all"` / `--scope all` keeps the old
+  population.
+- **A scan with no recognized tool entry point is `INCOMPLETE`**, with a
+  warning naming the config keys that teach agentgauge your framework.
+- **Rules 2, 3 and 5 apply to tool entry points**, not to every function
+  with a sink; audit logging and rate limiting are satisfied by anything the
+  tool calls.
+
+### Changed — human oversight (breaking)
+
+- **Approval must dominate the sink.** It has to run before the call on the
+  way to it: an enclosing condition, an earlier guard statement, an
+  approval decorator, or the same at every reachable call site of the
+  helper containing the sink. Each of these used to turn an ungated
+  `subprocess.run(cmd, shell=True)` into `PASS` and now fails critical: an
+  approval check after the sink; a tool parameter named `confirm` (the
+  model sets it); `approved = True`; `if settings.auto_approve:`;
+  `user.is_authorized(...)`; a call into `humanize`;
+  `extra_approval_markers = ["run"]`.
+- Vocabulary: `authoriz` and the bare `human` substring are removed;
+  MCP elicitation (`ctx.elicit`) and ask-a-human phrasing are added.
+  Framework-injected context (`ctx: Context`, `RunContextWrapper`) is not
+  treated as a model-controlled parameter.
+
+### Changed — other rules (breaking)
+
+- **Input validation** needs a real test or validator before use. Bare
+  truthiness, `is None`, `isinstance()` and approval calls no longer count;
+  a sensitive call is never a validator (`subprocess.check_output(cmd)`
+  validated `cmd` because of "check"); `Annotated[str, Field()]` without a
+  constraint no longer counts. New inputs: camelCase names, Pydantic
+  input-model fields, low-level `arguments["path"]` reads. New evidence:
+  `Enum` types, constrained `Field`/`StringConstraints`, Pydantic
+  validators, `safe_*`/`secure_*`/`ensure_*` helpers, one assignment hop.
+- **Audit logging** needs a logger-shaped call: `math.log`, `np.log` and
+  friends no longer count; MCP `ctx.info(...)` does.
+- **Error handling** reports a broad handler that only discards the error,
+  and a `try`/`finally` with no handler; it accepts handling at every call
+  site of a helper.
+
+### Added
+
+- **New sinks:** dynamic SQL on a DB handle (`sql exec`, critical);
+  payment-SDK writes (`stripe.Refund.create`, `client.payment_intents
+  .confirm`); HTTP writes to payment API hosts; Kubernetes deletes;
+  `getattr(os, "system")`, `__import__`, `importlib.import_module` with
+  constant arguments. A call that resolves to a scanned function is no
+  longer itself a sink.
+- **`FAIL_SCORE` verdict** and a default score floor: `min_score` defaults
+  to 70 (`0` disables). Previously the recommended verdict-only gate passed
+  a 35/100 scan.
+- **`accepted_risks`** — reviewed, reasoned exceptions in config that clear
+  a specific finding (critical included), are listed with their reason in
+  every report and as SARIF `external` suppressions; stale entries warn;
+  `--ignore-accepted-risks` turns them off.
+- Config: `scope`, `extra_tool_decorators`, `extra_tool_entry_points`;
+  `min_score` range check; approval markers that match a sink name are
+  rejected. CLI: `--scope`, `--ignore-accepted-risks`. Action: `scope`.
+- Findings carry `column` and `function`. JSON adds `min_score`, `scope`,
+  `tool_functions`, `out_of_scope_sensitive_calls`, `accepted_risks`.
+- **SARIF:** line-independent `partialFingerprints`, columns, logical
+  locations, `helpUri`, help text, GitHub `security-severity`, suppressed
+  and accepted findings as results with `suppressions`.
+- **Benchmark:** a labelled corpus (`benchmarks/`) with per-rule
+  precision/recall, gated in CI. Current: 83.0% precision, 92.9% recall over
+  the four measured rules; 13/13 critical verdicts.
+- CI builds the wheel and runs it from a clean virtualenv.
+- TLS-verification flags: `verify_ssl_certs`, `check_hostname`,
+  `validate_certs`, ... set to `False` are permissive defaults.
+
+### Fixed
+
+- Tools defined under `try`/`if` blocks at module or class level were not
+  seen.
+- Invariant tests now enforce the README's privacy table: the only write is
+  the requested baseline, the environment is never read, and the documented
+  import list matches the code.
+
+### Earlier changes since 0.1.0
 
 ### Removed
 
