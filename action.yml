@@ -13,16 +13,23 @@ inputs:
     default: "."
   min-score:
     description: >-
-      Fail if the governance score is below this. Left empty, only the
-      verdict gates the build -- which is the recommended setup: the score
-      is a trend line, the verdict is the load-bearing output (see RULES.md).
+      The score a PASS needs; below it the verdict is FAIL_SCORE and the
+      step fails. Left empty, [tool.agentgauge] min_score applies, which
+      defaults to 70. "0" disables the score floor.
+    required: false
+    default: ""
+  scope:
+    description: >-
+      "tools" (default) judges only code reachable from a recognized tool
+      entry point; "all" treats every function with a sensitive action as
+      a tool. Left empty, [tool.agentgauge] scope applies.
     required: false
     default: ""
   fail-on-incomplete:
     description: >-
       Fail on an INCOMPLETE verdict: a file that could not be parsed, a
-      disabled critical-gate rule, or a scan that found zero applicable
-      sites and therefore proved nothing.
+      disabled critical-gate rule, no recognized tool entry point, or a scan
+      that found zero applicable sites and therefore proved nothing.
     required: false
     default: "false"
   sarif-file:
@@ -52,6 +59,7 @@ runs:
       env:
         AG_PATH: ${{ inputs.path }}
         AG_MIN_SCORE: ${{ inputs.min-score }}
+        AG_SCOPE: ${{ inputs.scope }}
         AG_FAIL_INCOMPLETE: ${{ inputs.fail-on-incomplete }}
         AG_SARIF: ${{ inputs.sarif-file }}
         AG_CONFIG: ${{ inputs.config }}
@@ -68,6 +76,9 @@ runs:
         # repo has already been bitten by once (see the dogfood job).
         if [ -n "$AG_MIN_SCORE" ]; then
           args+=(--min-score "$AG_MIN_SCORE")
+        fi
+        if [ -n "$AG_SCOPE" ]; then
+          args+=(--scope "$AG_SCOPE")
         fi
         if [ "$AG_FAIL_INCOMPLETE" = "true" ]; then
           args+=(--fail-on-incomplete)
