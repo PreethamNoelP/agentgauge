@@ -161,6 +161,14 @@ that would match almost everything, or an approval marker that matches a
 sink's own name (`"run"`) is an error, not a silent no-op. The full
 reference is in [RULES.md](RULES.md#configuration).
 
+**Scanning code you do not control?** The config belongs to the scanned
+repository, so it can exclude its own files, disable rules and accept
+risks, and a repository can grade itself. Pass `--no-config` (the Action's
+`no-config: "true"`) to ignore it and use the built-in defaults; this also
+applies to a pull request from a fork that edits `[tool.agentgauge]` in the
+same change it is judged by. When an `exclude` hides a file that contains a
+sensitive call, the report warns and names the file.
+
 ### GitHub Actions
 
 ```yaml
@@ -183,7 +191,7 @@ With code scanning — the step still exits with the governance result:
 ```
 
 Inputs: `path`, `min-score`, `scope`, `fail-on-incomplete`, `sarif-file`,
-`config`. The action installs agentgauge from its own checkout, so what runs
+`config`, `no-config`. The action installs agentgauge from its own checkout, so what runs
 is exactly the ref you pinned. Pin a full commit SHA until release tags are
 published.
 
@@ -207,7 +215,7 @@ the score are whole-program properties.
 |---|---|
 | **Network** | None. The package imports `argparse, ast, collections, dataclasses, fnmatch, functools, hashlib, io, json, os, pathlib, re, sys, tokenize, tomllib, typing` and nothing else. No HTTP client, socket, DNS lookup or update check. |
 | **Files written** | Only the baseline file you name with `--update-baseline`. |
-| **Files read** | `.py` files and known MCP config files under the target, plus one config file. Symlinks pointing outside the scan root are refused. |
+| **Files read** | `.py` files and known MCP config files under the target, plus one config file. Symlinks and Windows junctions that lead outside the scan root are refused. |
 | **Code execution** | None. Scanned code is never imported, evaluated or run. |
 | **Environment** | Never read. |
 | **Dependencies** | Zero at runtime. |

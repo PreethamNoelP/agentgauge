@@ -1,3 +1,5 @@
+import subprocess
+import sys
 from pathlib import Path
 
 import pytest
@@ -419,11 +421,56 @@ def test_escapes_scan_root_refuses_an_unresolvable_link(tmp_path):
         assert escapes_scan_root(_FakeLink(error), tmp_path) is True
 
 
-def test_escapes_scan_root_ignores_non_symlinks_without_resolving(tmp_path):
-    # A plain file must short-circuit before any resolve() call -- that is
-    # what keeps the check off the hot path for every ordinary file.
-    plain = _FakeLink(OSError("resolve must not be called"), symlink=False)
+def test_escapes_scan_root_ignores_plain_files_without_resolving(
+    tmp_path, monkeypatch
+):
+    # A plain file under plain directories must short-circuit before any
+    # resolve() call -- that is what keeps the check off the hot path for
+    # every ordinary file.
+    (tmp_path / "pkg").mkdir()
+    plain = tmp_path / "pkg" / "plain.py"
+    plain.write_text("x = 1\n")
+
+    def no_resolve(self, strict=False):
+        raise AssertionError("resolve must not be called")
+
+    monkeypatch.setattr(Path, "resolve", no_resolve)
     assert escapes_scan_root(plain, tmp_path) is False
+
+
+def _make_junction(link: Path, target: Path) -> bool:
+    if sys.platform != "win32":
+        return False
+    done = subprocess.run(
+        ["cmd", "/c", "mklink", "/J", str(link), str(target)],
+        capture_output=True,
+        check=False,
+    )
+    return done.returncode == 0
+
+
+def test_junction_out_of_the_tree_is_refused_and_reported(tmp_path):
+    # Windows directory junctions are not symlinks (is_symlink() is False)
+    # yet rglob descends through them, so a junction used to pull files from
+    # outside the scan root into the report.
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    (outside / "leak.py").write_text(
+        "@mcp.tool()\ndef OUTSIDE_FUNC(p):\n    import os; os.system(p)\n"
+    )
+    (outside / "mcp.json").write_text('{"autoApprove": true}')
+    root = tmp_path / "root"
+    root.mkdir()
+    (root / "ok.py").write_text("x = 1\n")
+    if not _make_junction(root / "linked", outside):
+        pytest.skip("directory junctions are only available on Windows")
+
+    report = scan(root, config=Config(rules=RuleConfig(scope="all")))
+
+    assert "OUTSIDE_FUNC" not in str(report.to_dict())
+    assert report.config_files_scanned == 0
+    assert sum("not followed" in entry for entry in report.skipped) == 2
+    assert report.verdict == "INCOMPLETE"
 
 
 # --- config excludes must be visible in the report ---

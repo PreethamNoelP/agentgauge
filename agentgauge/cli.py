@@ -25,7 +25,7 @@ from agentgauge.baseline import (
     load_baseline,
     write_baseline,
 )
-from agentgauge.config import SCOPES, ConfigError, load_config
+from agentgauge.config import SCOPES, Config, ConfigError, load_config
 from agentgauge.sarif import build_sarif
 from agentgauge.scanner import scan
 from agentgauge.scoring import ScanReport
@@ -211,13 +211,22 @@ def _build_parser() -> argparse.ArgumentParser:
              "not be parsed, or a disabled critical-gate rule, means the scan "
              "did not see everything it claims to cover",
     )
-    parser.add_argument(
+    config_source = parser.add_mutually_exclusive_group()
+    config_source.add_argument(
         "--config",
         type=Path,
         default=None,
         metavar="PATH",
         help="path to a TOML file with a [tool.agentgauge] table; "
              "default is to look for pyproject.toml next to the target",
+    )
+    config_source.add_argument(
+        "--no-config",
+        action="store_true",
+        help="ignore the target's own pyproject.toml and use the built-in "
+             "defaults. Use this when scanning code you do not control: its "
+             "[tool.agentgauge] table can exclude files, disable rules and "
+             "accept risks, so a repository can otherwise grade itself",
     )
     parser.add_argument(
         "--baseline",
@@ -272,7 +281,22 @@ def _emit(
             pass
 
 
+def _escape_unencodable_output() -> None:
+    """Make a character the console cannot encode print as an escape instead
+    of raising. File names come from the scanned repository, so a single
+    non-ASCII file name under a cp1252 console would otherwise end the report with a
+    traceback halfway through -- and exit 1, the governance-failure code."""
+    for stream in (sys.stdout, sys.stderr):
+        reconfigure = getattr(stream, "reconfigure", None)
+        if reconfigure is not None:
+            try:
+                reconfigure(errors="backslashreplace")
+            except (ValueError, OSError):
+                pass
+
+
 def main(argv: list[str] | None = None) -> int:
+    _escape_unencodable_output()
     parser = _build_parser()
     args = parser.parse_args(argv)
 
@@ -287,7 +311,7 @@ def main(argv: list[str] | None = None) -> int:
         return 2
 
     try:
-        config = load_config(target, args.config)
+        config = Config() if args.no_config else load_config(target, args.config)
     except ConfigError as exc:
         print(f"agentgauge: {exc}", file=sys.stderr)
         return 2

@@ -94,8 +94,21 @@ def iter_config_files(
         yield path
 
 
-def _line_of(text: str, offset: int) -> int:
-    return text.count("\n", 0, offset) + 1
+class _LineCounter:
+    """Line numbers for increasing offsets, counting only the text between
+    one lookup and the next. Counting from the start of the file for every
+    match is quadratic, and a few megabytes of flagged booleans stalls a
+    scan for minutes."""
+
+    def __init__(self, text: str) -> None:
+        self._text = text
+        self._offset = 0
+        self._line = 1
+
+    def line_of(self, offset: int) -> int:
+        self._line += self._text.count("\n", self._offset, offset)
+        self._offset = offset
+        return self._line
 
 
 def scan_config_file(
@@ -135,6 +148,7 @@ def scan_config_file(
         collapse_flag_name(n) for n in config.dangerous_when_false
     }
 
+    lines = _LineCounter(text)
     sites, passed, findings = 0, 0, []
     basename = path.name
     for match in _BOOL_BINDING_RE.finditer(text):
@@ -155,7 +169,7 @@ def scan_config_file(
             Finding(
                 rule=RULE_ID,
                 file=rel,
-                line=_line_of(text, match.start()),
+                line=lines.line_of(match.start()),
                 message=f"permissive default: '{name}={literal}' disables "
                         f"a safety control (in {basename})",
                 fix=f"Set {name}={'false' if value else 'true'} in "

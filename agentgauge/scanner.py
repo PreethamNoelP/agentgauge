@@ -8,6 +8,7 @@ contributes nothing to the score, in either direction, and makes the
 verdict INCOMPLETE so a partial view never looks like a full pass.
 """
 
+import functools
 import os
 import tokenize
 from collections.abc import Callable, Iterator
@@ -60,8 +61,39 @@ def iter_python_files(
         yield path
 
 
+# FILE_ATTRIBUTE_REPARSE_POINT. Windows directory junctions and mount points
+# carry it but are not symlinks: Path.is_symlink() is False for them while
+# the directory walk descends straight through.
+_REPARSE_POINT = 0x400
+
+
+@functools.lru_cache(maxsize=8192)
+def _is_redirect(path: Path) -> bool:
+    """True if `path` is a symlink or a Windows reparse point (junction).
+    An entry that cannot be inspected counts as a redirect: the caller then
+    falls through to the strict resolve() check."""
+    try:
+        st = path.lstat()
+    except OSError:
+        return True
+    return path.is_symlink() or bool(
+        getattr(st, "st_file_attributes", 0) & _REPARSE_POINT
+    )
+
+
+def _reached_through_redirect(path: Path, root: Path) -> bool:
+    if path.is_symlink():
+        return True
+    try:
+        rel = path.relative_to(root)
+    except ValueError:
+        return True
+    return any(_is_redirect(root / parent) for parent in rel.parents if parent.parts)
+
+
 def escapes_scan_root(path: Path, root: Path) -> bool:
-    """True if `path` is a symlink whose target lies outside `root`.
+    """True if `path` is a link, or sits under a redirected directory, whose
+    real location lies outside `root`.
 
     Scanned repositories are untrusted. A file named `config.py` that is
     really a link to ~/.aws/credentials would otherwise be read and parsed,
@@ -70,18 +102,22 @@ def escapes_scan_root(path: Path, root: Path) -> bool:
     surface in the report under an in-tree path. Refusing to follow the link
     removes the question.
 
-    Symlinks that stay *inside* the scan root are followed normally -- they
+    Links that stay *inside* the scan root are followed normally -- they
     are ordinary repository layout (a shared module linked into a package),
     and skipping them would silently shrink coverage.
 
-    Only files are checked: pathlib's `**` does not descend into symlinked
-    directories, so a link cannot redirect the walk itself.
+    pathlib's `**` does not descend into symlinked directories, but on
+    Windows it does descend into directory junctions, which is_symlink()
+    does not report. So the check covers every directory between the root
+    and the file as well as the file itself. Ordinary files under ordinary
+    directories short-circuit before any resolve() call; only a path with a
+    redirect somewhere above it pays for one.
 
     An unresolvable link -- a loop, or a target on a filesystem that errors
     -- counts as escaping. "Cannot prove it stays inside" is the same answer
     as "leaves" for this purpose.
     """
-    if not path.is_symlink():
+    if not _reached_through_redirect(path, root):
         return False
     try:
         # Both sides resolved, so a checkout that itself lives under a
@@ -146,6 +182,29 @@ def _read_source(path: Path) -> str:
 REUSE_PARSED_BYTES = 8_000_000
 
 
+def _excluded_with_sensitive_calls(
+    paths: list[Path],
+    parse: Callable[[Path, str, Callable[[str], None] | None], FileContext | None],
+    root: Path,
+    cwd: Path,
+) -> list[str]:
+    """Display paths of excluded files that contain a sensitive call.
+
+    Files are parsed one at a time and dropped, so memory stays bounded by
+    one file's AST, as in the scan itself. A file that cannot be read or
+    parsed is not reported here: it could not have been judged either way.
+    """
+    hidden = []
+    for path in paths:
+        if escapes_scan_root(path, root):
+            continue
+        rel = _display_path(path, root, cwd)
+        ctx = parse(path, rel, None)
+        if ctx is not None and ctx.candidate_sensitive_calls:
+            hidden.append(rel)
+    return hidden
+
+
 def module_name(path: Path, root: Path) -> tuple[str, bool]:
     """Dotted module name for a file, relative to the scan root, and whether
     it is a package's __init__."""
@@ -170,9 +229,13 @@ def scan(target: str | Path, config: Config | None = None) -> ScanReport:
     skipped: list[str] = []
     excluded = 0
 
-    def count_excluded(_path: Path) -> None:
+    excluded_py: list[Path] = []
+
+    def count_excluded(path: Path) -> None:
         nonlocal excluded
         excluded += 1
+        if path.suffix == ".py":
+            excluded_py.append(path)
 
     paths = list(iter_python_files(root, config.exclude, count_excluded))
 
@@ -297,4 +360,14 @@ def scan(target: str | Path, config: Config | None = None) -> ScanReport:
             f"{excluded} file(s) were not scanned because an 'exclude' pattern "
             "in the config matched them"
         )
+        # The config belongs to the scanned repository, so an exclude is
+        # also a way for it to hide a sink. Say so when that is what it hid.
+        hidden = _excluded_with_sensitive_calls(excluded_py, parse, root, cwd)
+        if hidden:
+            shown = ", ".join(hidden[:5]) + (", ..." if len(hidden) > 5 else "")
+            report.warnings.append(
+                f"{len(hidden)} excluded file(s) contain calls agentgauge "
+                f"treats as sensitive actions and were not judged: {shown}. "
+                "If you do not control this repository, rerun with --no-config"
+            )
     return report

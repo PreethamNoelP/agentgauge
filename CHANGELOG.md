@@ -93,6 +93,10 @@ will see different results; the reasons are listed in order of impact.
 - CI builds the wheel and runs it from a clean virtualenv.
 - TLS-verification flags: `verify_ssl_certs`, `check_hostname`,
   `validate_certs`, ... set to `False` are permissive defaults.
+- **`--no-config`** (Action: `no-config`) ignores the scanned repository's
+  own `pyproject.toml`. Use it on code you do not control: the config can
+  exclude files, disable rules and accept risks. An `exclude` that hides a
+  file containing a sensitive call now produces a warning naming the file.
 
 ### Fixed
 
@@ -101,6 +105,19 @@ will see different results; the reasons are listed in order of impact.
 - Invariant tests now enforce the README's privacy table: the only write is
   the requested baseline, the environment is never read, and the documented
   import list matches the code.
+- **Scan time is linear in file size.** A single file of many tiny tool
+  functions (800 KB: 83 s) and an `mcp.json` of many flagged booleans
+  (4.9 MB: over two minutes) were quadratic and stayed under the 5 MB size
+  cap, so a pull request could stall CI. Both now finish in seconds.
+- **Directory junctions no longer leave the scan root.** On Windows,
+  pathlib descends through junctions, which `is_symlink()` does not report;
+  files outside the target were read and their identifiers reported. They
+  are now refused and the verdict is `INCOMPLETE`.
+- A file name the console cannot encode no longer ends the human report
+  with a traceback.
+- The Action passes the target after `--`, so a `path` beginning with a dash
+  is never read as an option, and `pyproject.toml` pins the build backend
+  to an exact version.
 
 ### Earlier changes since 0.1.0
 

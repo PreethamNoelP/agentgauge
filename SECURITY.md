@@ -36,6 +36,12 @@ not ordinary bugs:
    it never examined. `accepted_risks` is the one sanctioned exception, and
    it is printed with its reason in every report.
 
+   One boundary is a trust decision, not a bug: the config is read from the
+   scanned repository, so a repository you do not control can `exclude` its
+   own files. That is why `--no-config` exists, and why an exclude that hides
+   a file containing a sensitive call is called out by name in the report.
+   Use `--no-config` whenever the code under scan is not yours.
+
    An approval shape that RULES.md says is *not* accepted — a check after
    the sink, a tool argument, a constant, a permissive flag — but that
    nevertheless passes is in scope too. A shape RULES.md lists as a known
@@ -63,13 +69,14 @@ at code you cannot afford to leak:
 - **Nothing is written, except what you ask for.** A scan leaves the
   filesystem exactly as it was. The one write in the package is
   `--update-baseline PATH`, which writes the baseline file you named. No
-  temp files, no cache.
+  temp files, no cache. (Python itself may write `__pycache__` when it first
+  imports the package; that is the interpreter, not agentgauge.)
 - **Nothing is executed.** `ast.parse` and `tokenize` only. Scanned code is
   never imported, `eval`'d, `exec`'d, or run as a subprocess.
 - **Nothing outside the target is read.** `.py` files and known MCP client
   config files under the path you name, plus one config file and, with
-  `--baseline`, the baseline file. Symlinks resolving outside the scan root are
-  refused rather than followed.
+  `--baseline`, the baseline file. Symlinks, and Windows directory junctions,
+  that resolve outside the scan root are refused rather than followed.
 - **The environment is never read.** No `os.environ`, no `getenv`, no
   credential helpers.
 
@@ -90,7 +97,9 @@ directory layout.
 
 ## Supply chain
 
-agentgauge has no runtime dependencies. `pytest` is required only to run
+agentgauge has no runtime dependencies. The one thing the Action's install
+fetches from PyPI is the build backend (`setuptools`), pinned to an exact
+version in `pyproject.toml`; Dependabot proposes each bump. `pytest` is required only to run
 the test suite. That is deliberate and intended to stay that way: a
 governance scanner that pulls in a transitive dependency tree is a poor
 trade for a security-sensitive CI step.
