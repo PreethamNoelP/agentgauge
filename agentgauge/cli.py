@@ -272,7 +272,22 @@ def _emit(
             pass
 
 
+def _escape_unencodable_output() -> None:
+    """Make a character the console cannot encode print as an escape instead
+    of raising. File names come from the scanned repository, so a single
+    non-ASCII file name under a cp1252 console would otherwise end the report with a
+    traceback halfway through -- and exit 1, the governance-failure code."""
+    for stream in (sys.stdout, sys.stderr):
+        reconfigure = getattr(stream, "reconfigure", None)
+        if reconfigure is not None:
+            try:
+                reconfigure(errors="backslashreplace")
+            except (ValueError, OSError):
+                pass
+
+
 def main(argv: list[str] | None = None) -> int:
+    _escape_unencodable_output()
     parser = _build_parser()
     args = parser.parse_args(argv)
 
