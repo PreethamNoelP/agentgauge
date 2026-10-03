@@ -353,8 +353,8 @@ def test_findings_order_is_fully_specified():
     # would produce different JSON.
     report = score_contexts([ctx("import shutil\n@mcp.tool()\ndef f(p):\n    shutil.rmtree(p)\n")])
 
-    same_line = [f for f in report.findings if f.line == 3]
-    assert [f.rule for f in same_line] == sorted(f.rule for f in same_line)
+    same_spot = [(f.column, f.rule) for f in report.findings if f.line == 3]
+    assert same_spot == sorted(same_spot)
     assert report.findings == sorted(
         report.findings, key=lambda f: (f.file, f.line, f.column, f.rule, f.message)
     )

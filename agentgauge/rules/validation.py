@@ -1,9 +1,15 @@
 """Rule 5 of 6: Tool scope & input validation (15 points).
 
-Model-supplied inputs with risky names (path, cmd, query, url, ...) must be
-validated before they reach a sensitive call. Inputs are:
+Model-supplied inputs must be validated before they reach a sensitive call
+or a file path. Inputs are:
 
-  - risky-named parameters of tool entry points (snake_case or camelCase);
+  - parameters of tool entry points that have a risky name (path, cmd,
+    query, url, ... in snake_case or camelCase), or that -- whatever their
+    name -- flow into a sensitive call or into building a file path
+    (`open(name)`, `Path(name)`, `os.path.join(ROOT, name)`, `ROOT / name`):
+    `read_note(name)` doing `(NOTES / name).read_text()` is path traversal
+    no matter what the parameter is called. Numeric and boolean parameters
+    are not inputs of this kind;
   - risky-named fields of a Pydantic-style input model a tool takes as a
     parameter (a class defined in the same file);
   - risky keys read from a low-level MCP `arguments` dict
@@ -83,6 +89,19 @@ _VALIDATOR_CALLS = frozenset(
     {"AfterValidator", "BeforeValidator", "PlainValidator", "WrapValidator"}
 )
 _ENUM_BASES = frozenset({"Enum", "StrEnum", "IntEnum", "Flag", "IntFlag"})
+# Calls that turn a string into a filesystem location.
+_PATH_CALLS = frozenset({
+    "open", "io.open", "os.open", "Path", "pathlib.Path", "PurePath",
+    "pathlib.PurePath", "PosixPath", "WindowsPath", "os.path.join",
+    "os.path.expanduser", "os.path.abspath", "os.path.realpath",
+    "os.path.normpath", "os.listdir", "os.scandir", "os.stat", "os.walk",
+    "shutil.copy", "shutil.copyfile", "shutil.copytree", "shutil.move",
+})
+_SCALAR_ANNOTATIONS = frozenset({"int", "float", "bool", "complex"})
+# Sinks that interpret a string's content -- as a path, a command, code or a
+# query. An identifier handed to a payment or cloud API is authorized by that
+# API, so flowing into one does not by itself make a parameter an input.
+_INTERPRETING_LABELS = frozenset({"file delete", "shell exec", "code exec", "sql exec"})
 
 
 def _names_in(node: ast.AST) -> set[str]:
@@ -166,10 +185,17 @@ def _raw_names(node: ast.AST, ctx: FileContext, tokens: frozenset[str]) -> set[s
 
 
 def _first_raw_use(
-    fn: FunctionNode, ctx: FileContext, tokens: frozenset[str]
+    fn: FunctionNode,
+    ctx: FileContext,
+    tokens: frozenset[str],
+    labels: frozenset[str] | None = None,
 ) -> dict[str, tuple[int, int]]:
+    """Where each name first reaches a sensitive call unsanitized, optionally
+    only for calls with the given labels."""
     first: dict[str, tuple[int, int]] = {}
-    for call, _label in ctx.sensitive_calls_by_function.get(id(fn), ()):
+    for call, label in ctx.sensitive_calls_by_function.get(id(fn), ()):
+        if labels is not None and label not in labels:
+            continue
         position = (call.lineno, call.col_offset)
         for name in _raw_names(call, ctx, tokens):
             if name not in first or position < first[name]:
@@ -391,12 +417,76 @@ def _inside_validation(node: ast.AST, fn: FunctionNode, ctx: FileContext, tokens
     return False
 
 
+def _path_like_names(nodes: list[ast.AST], ctx: FileContext) -> set[str]:
+    """Names bound to a filesystem location anywhere in the file:
+    `NOTES = Path.home() / "notes"`, `root = os.path.join(BASE, "x")`."""
+    found: set[str] = set()
+    for _ in range(2):  # one more round for names built from path-like names
+        for node in nodes:
+            if (
+                isinstance(node, ast.Assign)
+                and len(node.targets) == 1
+                and isinstance(node.targets[0], ast.Name)
+                and _builds_path(node.value, ctx, found)
+            ):
+                found.add(node.targets[0].id)
+    return found
+
+
+def _builds_path(expr: ast.AST, ctx: FileContext, path_like: set[str]) -> bool:
+    for node in ast.walk(expr):
+        if isinstance(node, ast.Call):
+            name = call_name(node, ctx.import_aliases)
+            if name is not None and (name in _PATH_CALLS or name.endswith(("Path.home", "Path.cwd"))):
+                return True
+        elif isinstance(node, ast.Name) and node.id in path_like:
+            return True
+    return False
+
+
+def _path_flow_names(fn: FunctionNode, ctx: FileContext, path_like: set[str]) -> set[str]:
+    """Names used to build a file path in `fn`: arguments of a path call, or
+    the right side of `<path-like> / name`."""
+    names: set[str] = set()
+    for node in ctx.scope_nodes(fn):
+        if isinstance(node, ast.Call):
+            name = call_name(node, ctx.import_aliases)
+            if name is not None and name in _PATH_CALLS:
+                for arg in [*node.args, *(kw.value for kw in node.keywords)]:
+                    names |= _names_in(arg)
+        elif isinstance(node, ast.BinOp) and isinstance(node.op, ast.Div):
+            if _builds_path(node.left, ctx, path_like):
+                names |= _names_in(node.right)
+    return names
+
+
+def _is_scalar(annotation: ast.expr | None) -> bool:
+    return isinstance(annotation, ast.Name) and annotation.id in _SCALAR_ANNOTATIONS
+
+
+def _flows_to_risk(
+    name: str,
+    first_use: dict[str, tuple[int, int]],
+    path_flow: set[str],
+    derived: dict[str, set[str]],
+) -> bool:
+    """True if a parameter reaches a sink or a path, directly or through one
+    assignment (`target = NOTES / name` then `os.remove(target)`)."""
+    if name in first_use or name in path_flow:
+        return True
+    return any(
+        name in sources and (alias in first_use or alias in path_flow)
+        for alias, sources in derived.items()
+    )
+
+
 def check(ctx: FileContext) -> tuple[int, int, list[Finding]]:
     sites, passed, findings = 0, 0, []
     tokens = VALIDATION_TOKENS | ctx.config.validation_tokens
     risky = RISKY_PARAM_TOKENS | ctx.config.risky_param_tokens
     classes = _class_defs(ctx.all_nodes)
     seen_models: set[str] = set()
+    path_like = _path_like_names(ctx.all_nodes, ctx) if ctx.tool_functions else set()
 
     def report(line: int, col: int, fn: FunctionNode, message: str) -> None:
         findings.append(
@@ -420,18 +510,38 @@ def check(ctx: FileContext) -> tuple[int, int, list[Finding]]:
         evidence = _evidence(fn, ctx, tokens)
         first_use = _first_raw_use(fn, ctx, tokens)
         derived = _derived_names(fn, ctx)
+        path_flow = _path_flow_names(fn, ctx, path_like)
+        interpreted = _first_raw_use(fn, ctx, tokens, _INTERPRETING_LABELS)
 
         for arg in _params(fn):
-            if _is_risky(arg.arg, risky):
+            by_name = _is_risky(arg.arg, risky)
+            model = classes.get(
+                (_last(dotted_name(arg.annotation)) or "")
+                if isinstance(arg.annotation, (ast.Name, ast.Attribute)) else ""
+            )
+            by_flow = (
+                not by_name
+                and not _is_scalar(arg.annotation)
+                and model is None  # an input model's fields are judged one by one
+                # an arguments dict's keys are judged one by one
+                and arg.arg not in _ARGUMENT_DICT_NAMES
+                and not _is_dict_annotation(arg.annotation)
+                and _flows_to_risk(arg.arg, interpreted, path_flow, derived)
+            )
+            if by_name or by_flow:
                 sites += 1
                 if _annotation_is_constrained(arg.annotation, classes) or _is_validated(
                     arg.arg, evidence, first_use, derived
                 ):
                     passed += 1
-                else:
+                elif by_name:
                     report(arg.lineno, arg.col_offset, fn,
                            f"risky parameter '{arg.arg}' of tool '{fn.name}' "
                            "is used without validation")
+                else:
+                    report(arg.lineno, arg.col_offset, fn,
+                           f"parameter '{arg.arg}' of tool '{fn.name}' reaches a "
+                           "file path or sensitive call without validation")
             model_name = (
                 _last(dotted_name(arg.annotation))
                 if isinstance(arg.annotation, (ast.Name, ast.Attribute)) else None

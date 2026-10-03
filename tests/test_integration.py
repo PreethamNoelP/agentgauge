@@ -132,6 +132,10 @@ def test_vulnerable_fixture_covers_every_detection_shape():
         f.rule == "input-validation" and "argument 'path'" in f.message
         for f in report.findings
     )
+    assert any(
+        f.function == "read_note" and "reaches a file path" in f.message
+        for f in report.findings
+    )
     assert messages  # every finding names its function
     # The module-level setup call is not agent-reachable: counted, not judged.
     assert report.out_of_scope_sensitive_calls == 1
