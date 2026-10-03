@@ -5,11 +5,11 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "agentgauge"
 dynamic = ["version"]
-description = "Static governance scanner for MCP servers and AI agent tool-calling code — a linter for the OWASP Agentic Top 10."
+description = "Find the dangerous things your AI agent can do without asking a human: a static scanner for MCP servers and agent tool code."
 readme = "README.md"
 requires-python = ">=3.11"
-license = "MIT"
-license-files = ["LICENSE"]
+license = "Apache-2.0"
+license-files = ["LICENSE", "NOTICE"]
 authors = [{ name = "Preetham Noel P" }]
 keywords = [
     "mcp",
@@ -19,16 +19,23 @@ keywords = [
     "governance",
     "linter",
     "owasp",
+    "llm",
+    "prompt-injection",
+    "langchain",
+    "sarif",
 ]
 classifiers = [
     "Development Status :: 4 - Beta",
     "Environment :: Console",
     "Intended Audience :: Developers",
+    "Intended Audience :: Information Technology",
+    "Intended Audience :: System Administrators",
     "Operating System :: OS Independent",
     "Programming Language :: Python :: 3",
     "Programming Language :: Python :: 3.11",
     "Programming Language :: Python :: 3.12",
     "Programming Language :: Python :: 3.13",
+    "Topic :: Scientific/Engineering :: Artificial Intelligence",
     "Topic :: Security",
     "Topic :: Software Development :: Quality Assurance",
 ]
@@ -50,6 +57,8 @@ Homepage = "https://github.com/PreethamNoelP/agentgauge"
 Issues = "https://github.com/PreethamNoelP/agentgauge/issues"
 Changelog = "https://github.com/PreethamNoelP/agentgauge/blob/main/CHANGELOG.md"
 Documentation = "https://github.com/PreethamNoelP/agentgauge/blob/main/RULES.md"
+Source = "https://github.com/PreethamNoelP/agentgauge"
+Security = "https://github.com/PreethamNoelP/agentgauge/blob/main/SECURITY.md"
 
 [project.scripts]
 agentgauge = "agentgauge.cli:main"
