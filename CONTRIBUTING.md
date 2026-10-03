@@ -119,6 +119,18 @@ differs from the corpus labels, in either direction, so:
 
 See [benchmarks/README.md](benchmarks/README.md).
 
+## Releasing
+
+1. Bump `__version__` in `agentgauge/__init__.py` and date the version's
+   section in `CHANGELOG.md`.
+2. Update the version in the README's Action and pre-commit examples.
+3. Merge to `main`, then tag: `git tag -a vX.Y.Z -m "agentgauge X.Y.Z"` and
+   `git push origin vX.Y.Z`.
+4. Publish a GitHub Release for the tag. `.github/workflows/release.yml`
+   checks the tag matches the package version, runs the tests and the
+   benchmark, and publishes to PyPI through trusted publishing. PyPI
+   versions are permanent: a mistake needs a new version, not a re-upload.
+
 ## Pull requests
 
 - Branch from `main`, one logical change per commit.

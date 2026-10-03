@@ -200,6 +200,12 @@ agent = Agent(tools=[clean_directory])
 
 
 @mcp.tool()
+def read_note(name):
+    """Not called `path`, but it builds one: path traversal by another name."""
+    return open(os.path.join("/srv/notes", name)).read()
+
+
+@mcp.tool()
 def watch_forever(queue_name):
     """An agent-reachable loop that can never end."""
     while True:

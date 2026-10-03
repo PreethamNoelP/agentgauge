@@ -303,3 +303,50 @@ def test_derived_validation_does_not_cover_raw_use_of_the_input():
     )
     assert run(src)[:2] == (1, 0)
 
+
+# --- inputs found by where they flow, not by their name -------------------
+
+def test_innocently_named_param_building_a_path_is_an_input():
+    src = (
+        "from pathlib import Path\n"
+        "NOTES = Path.home() / 'notes'\n"
+        "@mcp.tool()\n"
+        "def read_note(name: str) -> str:\n"
+        "    return (NOTES / name).read_text()\n"
+    )
+    sites, passed, findings = run(src, scope="tools")
+    assert (sites, passed) == (1, 0)
+    assert "reaches a file path" in findings[0].message
+
+
+@pytest.mark.parametrize("use", [
+    "open(name).read()",
+    "os.path.join(ROOT, name)",
+    "Path(ROOT, name).unlink()",
+    "target = Path(ROOT) / name\n    os.remove(target)",
+    "subprocess.run(['grep', pattern])",
+])
+def test_param_flowing_into_a_path_or_sink_is_an_input(use):
+    param = "pattern" if "pattern" in use else "name"
+    src = f"@mcp.tool()\ndef t({param}):\n    {use}\n"
+    sites, passed, _ = run(src, scope="tools")
+    assert (sites, passed) == (1, 0)
+
+
+def test_flowing_param_validated_first_passes():
+    src = (
+        "@mcp.tool()\ndef t(name):\n"
+        "    if '/' in name or name.startswith('.'):\n        raise ValueError\n"
+        "    return open(os.path.join(ROOT, name)).read()\n"
+    )
+    assert run(src, scope="tools")[:2] == (1, 1)
+
+
+def test_numeric_params_and_unrelated_params_are_not_inputs():
+    src = (
+        "@mcp.tool()\ndef t(seconds: int, title):\n"
+        "    subprocess.run(['sleep', str(seconds)])\n"
+        "    return title.upper()\n"
+    )
+    assert run(src, scope="tools")[0] == 0
+

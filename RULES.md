@@ -242,14 +242,23 @@ exit (`if False: break`) passes.
 <a id="input-validation"></a>
 ## Rule 5 — Tool scope & input validation (`input-validation`, 15 pts)
 
-**Model-supplied inputs with risky names must be validated before they reach
-a sensitive call.** Inputs are:
+**Model-supplied inputs must be validated before they reach a sensitive call
+or a file path.** Inputs are:
 
 - parameters of tool entry points whose name has a risky token — `path`,
   `file`, `filename`, `dir`, `directory`, `folder`, `cmd`, `command`,
   `shell`, `script`, `query`, `sql`, `url`, `uri`, `host`, `endpoint`,
   `target`, `dest`, `destination`, plus `extra_risky_params` — split on
   `.`, `_` and camelCase (`filePath`, `sqlQuery`);
+- parameters of any name that flow — directly or through one assignment —
+  into building a file path (`open(name)`, `Path(name)`,
+  `os.path.join(ROOT, name)`, `ROOT / name` where `ROOT` is a path) or into
+  a sink that interprets strings (file delete, shell exec, code exec, SQL).
+  `read_note(name)` doing `(NOTES / name).read_text()` is path traversal
+  whatever the parameter is called. Not counted: `int`/`float`/`bool`
+  parameters, identifiers passed to payment or cloud APIs (those APIs
+  authorize them), and input models or `arguments` dicts, whose fields and
+  keys are judged individually;
 - risky-named fields of a Pydantic-style input model the tool takes as a
   parameter, when the class is defined in the same file;
 - risky keys read from a low-level `arguments` dict (`arguments["path"]`,
@@ -279,7 +288,11 @@ start before that call; a sanitizer wrapping the argument
 `command`, as long as `command` itself never reaches a sink unvalidated.
 
 **Known limits.** Validators with unrecognized names (`normalize(path)`)
-are false failures; extend the vocabulary. A risky value in an innocently
+are false failures; extend the vocabulary. A parameter passed as one
+element of an argv list (`["git", "commit", "-m", message]`) is reported
+even when, as there, no injection is possible — option injection through
+argv is a real attack class, so the rule does not try to tell the cases
+apart. A risky value in an innocently
 named parameter (`p`, `cmdline`) is invisible. Any tested comparison counts,
 correct or not. Input models defined in another file are not inspected.
 

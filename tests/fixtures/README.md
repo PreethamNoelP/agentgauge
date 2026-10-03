@@ -13,7 +13,7 @@ the code it reads.
 
 | File | Must score | Purpose |
 |---|---|---|
-| `vulnerable_server.py` | exactly **0.0 / 100** over 123 sites, verdict `FAIL_CRITICAL` | Every rule must fire. Each tool is a shape some version of agentgauge, or an obvious implementation of it, scored as clean — including every approval bypass (check after the sink, model-supplied `confirm`, authorization, constants, lookalikes). |
+| `vulnerable_server.py` | exactly **0.0 / 100** over 127 sites, verdict `FAIL_CRITICAL` | Every rule must fire. Each tool is a shape some version of agentgauge, or an obvious implementation of it, scored as clean — including every approval bypass (check after the sink, model-supplied `confirm`, authorization, constants, lookalikes) and path traversal through an innocently named parameter. |
 | `clean_server.py` | exactly **100.0 / 100** over 48 sites, zero findings | The false-positive canary: approval through MCP elicitation, helpers gated and protected at their call sites, input models, low-level dispatch. Legitimate governance patterns must never be flagged. |
 
 Both numbers are asserted in `tests/test_integration.py` and gated in CI, so
