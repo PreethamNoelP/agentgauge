@@ -94,8 +94,9 @@ baselines on critical findings. The only way to clear a critical finding
 without fixing it is a reviewed [accepted risk](#accepted-risks).
 
 **How much to trust the score.** Rules 1, 4, 5 and 6 judge structure and
-values; rules 2 and 3 (35 points) check that logging and rate-limiting
-vocabulary is *present*, not that it does its job. The weights are
+values; rules 2 and 3 (35 points) check that a logging call is made and a
+rate limiter is invoked, not that what is logged or the limits chosen are
+right. The weights are
 considered judgement, not fitted to data. Treat the score as a trend line and
 a floor a team agrees on, not as a certification.
 
@@ -126,9 +127,15 @@ literals (`QUERY = "SELECT ..."`, `STRIPE_URL = "https://api.stripe.com"`).
 `SafeLoader` and ubiquitous); `open(path, "w")`; HTTP `GET`s; constant,
 parameterized SQL.
 
-**Limits shared by every rule.** A sink reached through a dict of functions
-(`ACTIONS[name](p)`), a non-constant `getattr`, a function's return value
-(`get_deleter()(p)`) or a star import is invisible. Aliasing is one flat map
+**Sinks without a static name.** A call through a dispatch table holding a
+sensitive function (`ACTIONS = {"rm": shutil.rmtree}` then
+`ACTIONS[name](p)` or `ACTIONS.get(name)(p)`) takes the most severe label
+in the table; a computed attribute on a dangerous module
+(`getattr(os, name)(cmd)`) takes that module's worst member's label.
+
+**Limits shared by every rule.** A sink reached through a function's return
+value (`get_deleter()(p)`), a table built at run time, or a star import is
+invisible. Aliasing is one flat map
 per file, so a local variable shadowing an imported name still resolves to
 the import. Python only: TypeScript/JavaScript MCP servers are not read.
 
@@ -149,7 +156,10 @@ A call is gated if any of these holds:
    `assert human_review(p)`, or a bare call to an approval function —
    `require_approval(p)`, `await ctx.confirm(p)` — which is assumed to raise
    on denial.
-3. The enclosing function has an approval decorator (`@requires_approval`).
+3. The enclosing function has an approval decorator — named for approval
+   (`@requires_approval`), or defined in the scanned code with a wrapper
+   that asks before calling the function it wraps (`@policy_checked`,
+   including decorator factories), in any file.
 4. It lives in a helper, and **every reachable call path** into that helper
    is itself gated. Call cycles are never gated by assumption.
 
@@ -173,15 +183,19 @@ two assignment hops.
 - names bound only to constants (`approved = True; if approved:`);
 - machine authorization (`is_authorized`, `authorize`) and lookalikes
   (`humanize`, `is_human_readable`);
-- a check after the call, in a sibling branch, or in a nested function.
+- a check after the call, in a sibling branch, or in a nested function;
+- a check on the wrong side: the call must sit where approval was *given*.
+  `if approved(p): return` followed by the call, `if not approved(p):
+  <call>`, `answer == "no"` and `if user_declined:` all act when approval
+  was refused. A condition whose polarity cannot be read is accepted
+  rather than guessed.
 
-**Known limits.** Polarity is not checked: `if approved(p): return` followed
-by the sink passes, although the sink runs exactly when approval was
-refused. Approval enforced by middleware or a decorator whose name says
-nothing (`@guarded`) is a false failure — name it via
-`extra_approval_markers`, or record an [accepted risk](#accepted-risks). A
-read-only command through a shared subprocess helper (`git log`) is judged
-like any other shell exec.
+**Known limits.** Approval enforced by a decorator or middleware from a
+library that is not scanned, with a name that says nothing (`@guarded`), is
+a false failure — name it via `extra_approval_markers`, or record an
+[accepted risk](#accepted-risks). A read-only command through a shared
+subprocess helper (`git log`) is judged like any other shell exec. Values
+are followed through at most two assignments.
 
 <a id="audit-logging"></a>
 ## Rule 2 — Audit logging (`audit-logging`, 20 pts)
@@ -206,14 +220,19 @@ cannot check that the actor, action and arguments are recorded.
 <a id="rate-limiting"></a>
 ## Rule 3 — Rate limiting (`rate-limiting`, 15 pts)
 
-**Every tool entry point must reference rate-limit vocabulary** — in its
-body, its decorators, or anything it calls: an identifier containing
-`ratelimit`, `throttle` or `limiter` (underscores ignored), the `ratelimit`
-library's `@limits`, or `extra_rate_limit_markers`. Bare `limit` does not
-count (pagination, SQL `LIMIT`).
+**Every tool entry point must use a rate limiter** — in its body, its
+decorators, or anything it calls. *Use* means the limiter is called
+(`limiter.acquire()`, `await throttle.wait()`), applied as a decorator
+(`@limiter.limit("10/minute")`, the `ratelimit` library's `@limits`), or
+entered as a context manager (`async with rate_limiter:`). A name that is
+only assigned (`rate_limiter = None`), a parameter or a keyword argument
+does not count. Limiter vocabulary: identifiers containing `ratelimit`,
+`throttle` or `limiter` (underscores ignored), plus
+`extra_rate_limit_markers`. Bare `limit` does not count (pagination, SQL
+`LIMIT`).
 
-**Known limits.** Presence, not enforcement: a dead `rate_limiter = None`
-passes. Limiting done by a gateway is invisible — set
+**Known limits.** The rule confirms a limiter is invoked, not that its
+limits are sensible. Limiting done by a gateway is invisible — set
 `assume_external_rate_limiting = true`, which marks the category not
 applicable.
 

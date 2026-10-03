@@ -29,7 +29,7 @@ $ agentgauge .
 
 Python 3.11+. No dependencies, no account, no network access, and it never
 runs the code it reads. (Before the first PyPI release:
-`pip install git+https://github.com/PreethamNoelP/agentgauge.git@v0.3.0`.)
+`pip install git+https://github.com/PreethamNoelP/agentgauge.git@v0.4.0`.)
 
 ## What it catches
 
@@ -156,11 +156,11 @@ the labels in either direction:
 
 | Rule | Precision | Recall |
 |---|---:|---:|
-| human-oversight | 79.2% | 86.4% |
-| input-validation | 78.6% | 100.0% |
+| human-oversight | 81.5% | 100.0% |
+| input-validation | 81.2% | 100.0% |
 | error-handling | 92.9% | 100.0% |
 | permissive-defaults | 100.0% | 100.0% |
-| **all measured rules** | **83.3%** | **93.8%** |
+| **all measured rules** | **84.7%** | **100.0%** |
 
 Critical verdict correct for 14 of 14 test projects. *Precision*: how often
 a finding is a real problem. *Recall*: how many real problems it finds. The
@@ -174,7 +174,7 @@ agentgauge gets wrong —
 **GitHub Actions**
 
 ```yaml
-- uses: PreethamNoelP/agentgauge@v0.3.0
+- uses: PreethamNoelP/agentgauge@v0.4.0
   with:
     path: .
     fail-on-incomplete: "true"
@@ -183,7 +183,7 @@ agentgauge gets wrong —
 With GitHub code scanning (findings appear on the pull request):
 
 ```yaml
-- uses: PreethamNoelP/agentgauge@v0.3.0
+- uses: PreethamNoelP/agentgauge@v0.4.0
   with:
     sarif-file: agentgauge.sarif
   continue-on-error: true
@@ -194,14 +194,14 @@ With GitHub code scanning (findings appear on the pull request):
 
 Inputs: `path`, `min-score`, `scope`, `fail-on-incomplete`, `sarif-file`,
 `config`, `no-config`. For the strictest supply-chain posture, pin the tag's
-full commit SHA instead of `v0.3.0`.
+full commit SHA instead of `v0.4.0`.
 
 **pre-commit**
 
 ```yaml
 repos:
   - repo: https://github.com/PreethamNoelP/agentgauge
-    rev: v0.3.0
+    rev: v0.4.0
     hooks:
       - id: agentgauge
         args: [--fail-on-incomplete]
@@ -283,21 +283,23 @@ to report a vulnerability.
 
 ## What it cannot do
 
-agentgauge reads code; it does not run it or trace every value. So:
+agentgauge reads code; it does not run it. That makes it safe and fast, and
+it sets some honest limits:
 
-- It can be **wrong in both directions** — the benchmark above shows how
-  often. Treat findings as a reviewer's notes, not a verdict from a judge.
-- It does not notice an approval check that is **written backwards**
-  (acting when approval is refused), or a dangerous call reached through a
-  **lookup table** or a computed name.
-- It cannot tell that a **custom decorator** such as `@guarded` asks a
-  human — teach it with `extra_approval_markers`, or record an accepted
-  risk.
-- Logging and rate limiting are checked for **presence**, not correctness.
-- **Python only.** TypeScript and JavaScript MCP servers are not supported
-  yet.
-- A 100/100 is **not a certification**. It means the patterns agentgauge
-  knows are in place.
+- **It can still be wrong.** On the benchmark it finds every known issue,
+  and about 1 finding in 7 is a false alarm — typically a read-only
+  command, a read-only query, or a validator with an unusual name. Treat
+  findings as a careful reviewer's notes, not a final ruling.
+- **Approval code it cannot see.** It reads approval decorators defined in
+  your project, but not ones from an external library with a neutral name
+  (`@guarded`). Name them once with `extra_approval_markers`.
+- **Content is not judged.** It checks that a logging call is made and a
+  rate limiter is invoked, not what is logged or whether the limits are
+  sensible.
+- **Python only.** TypeScript and JavaScript MCP servers are on the
+  roadmap.
+- **A 100/100 is not a certification.** It means every pattern agentgauge
+  knows is in place — not that nothing else can go wrong.
 
 ## How it works
 
@@ -318,15 +320,15 @@ code execution. Design details are in
 
 ## Project status
 
-Version 0.3 — usable today, and the rules are still being refined. Tested
-on Linux and Windows, Python 3.11–3.13: 1,187 automated tests, strict type
+Version 0.4 — usable today, and the rules are still being refined. Tested
+on Linux and Windows, Python 3.11–3.13: 1,222 automated tests, strict type
 checking, linting, the accuracy benchmark, and a build-and-install check of
 the published package, on every change.
 
 **Roadmap**
 
 - A benchmark built from real open-source MCP servers
-- Detecting approval checks written backwards, and deeper value tracking
+- Deeper value tracking across functions
 - TypeScript/JavaScript support
 - Plugins for custom rules
 - New checks: leaked secrets, server-side request forgery, over-broad tool
