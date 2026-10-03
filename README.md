@@ -323,11 +323,14 @@ on Linux and Windows, Python 3.11–3.13: 1,187 automated tests, strict type
 checking, linting, the accuracy benchmark, and a build-and-install check of
 the published package, on every change.
 
-**Roadmap:** a benchmark built from real open-source MCP servers ·
-backwards-approval detection and deeper value tracking ·
-TypeScript/JavaScript support · plugins for custom rules · new checks for
-leaked secrets, server-side request forgery and over-broad tool
-permissions.
+**Roadmap**
+
+- A benchmark built from real open-source MCP servers
+- Detecting approval checks written backwards, and deeper value tracking
+- TypeScript/JavaScript support
+- Plugins for custom rules
+- New checks: leaked secrets, server-side request forgery, over-broad tool
+  permissions
 
 ## Contributing
 
