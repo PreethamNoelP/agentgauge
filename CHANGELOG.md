@@ -8,6 +8,35 @@ scanner, "breaking" includes anything that can change a repository's score
 or verdict, since that is what CI gates on — those are called out
 explicitly.
 
+## [0.3.0] — 2026-10-03
+
+The first release intended for PyPI.
+
+### Changed
+
+- **License: Apache License 2.0** (was MIT). The same permissions, plus an
+  explicit patent grant and contribution terms. 0.2.0 and earlier remain
+  available under MIT.
+- **Input validation finds inputs by where they flow** (changes scores). A
+  tool parameter of any name that reaches a file path (`open`, `Path`,
+  `os.path.join`, `ROOT / name`) or a string-interpreting sink (file
+  delete, shell, code, SQL) is now an input. Found by testing a
+  tutorial-style notes server, whose `read_note(name)` path traversal was
+  invisible because the parameter was not called `path`.
+
+### Added
+
+- `.github/workflows/release.yml`: publish to PyPI from a GitHub Release
+  via trusted publishing, after checking the tag matches the version and
+  re-running the tests and benchmark.
+- A clear message when the scanned directory is a JavaScript/TypeScript
+  project, which is not supported yet.
+- `CODE_OF_CONDUCT.md`, a pull request template, and issue-chooser links.
+- README rewritten for first-time readers and the PyPI page; package
+  metadata with a clearer summary, keywords and classifiers.
+- Benchmark corpus: `notes_server.py`. Now 83.3% precision, 93.8% recall,
+  14/14 critical verdicts.
+
 ## [0.2.0] — 2026-10-03
 
 Everything in this section changes scores and verdicts. Most repositories

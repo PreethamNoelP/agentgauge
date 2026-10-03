@@ -14,19 +14,20 @@ $ python benchmarks/run.py --corpus path/to/your/labelled/corpus
 
 | Rule | TP | FP | FN | Precision | Recall |
 |---|---:|---:|---:|---:|---:|
-| human-oversight | 17 | 5 | 3 | 77.3% | 85.0% |
-| input-validation | 9 | 2 | 0 | 81.8% | 100.0% |
-| error-handling | 11 | 1 | 0 | 91.7% | 100.0% |
+| human-oversight | 19 | 5 | 3 | 79.2% | 86.4% |
+| input-validation | 11 | 3 | 0 | 78.6% | 100.0% |
+| error-handling | 13 | 1 | 0 | 92.9% | 100.0% |
 | permissive-defaults | 2 | 0 | 0 | 100.0% | 100.0% |
-| all measured rules | 39 | 8 | 3 | 83.0% | 92.9% |
+| all measured rules | 45 | 9 | 3 | 83.3% | 93.8% |
 
-Critical-verdict accuracy: 13/13 scan units (100.0%).
+Critical-verdict accuracy: 14/14 scan units (100.0%).
 
 ## What the corpus is — and is not
 
 The corpus is **written for this benchmark**, in the shape of real MCP
 servers and agent toolkits: the reference filesystem, SQLite and git
-servers, a Stripe payments server, a low-level SDK `call_tool` dispatcher,
+servers, a Stripe payments server, a tutorial-style notes server, a
+low-level SDK `call_tool` dispatcher,
 LangChain, OpenAI Agents SDK and LlamaIndex tools, a cross-file package,
 ordinary library code with no tools, adversarial bypass attempts, and a
 `known_limits.py` file of cases agentgauge gets wrong today.
@@ -35,7 +36,7 @@ It is **not** a sample of real-world repositories, so these numbers say how
 the rules behave on the patterns the corpus covers, not how often those
 patterns occur in the wild. Two consequences:
 
-- The corpus is small (13 scan units, 50 labelled sites). One more case can
+- The corpus is small (14 scan units, 57 labelled sites). One more case can
   move a percentage by several points.
 - It was written by the same people who wrote the rules. The defence is in
   how labels are assigned (below), and in `known_limits.py`, which exists to
@@ -89,3 +90,4 @@ From `known_limits.py` and the `known-fp` labels elsewhere:
 | a fixed, read-only subprocess call (`git status`, `git log`) | false positive |
 | a validated read-only SQL query, or an allowlisted `PRAGMA` | false positive |
 | a search-index `query` parameter | false positive |
+| a value passed as one argv element (`git commit -m message`) | false positive |

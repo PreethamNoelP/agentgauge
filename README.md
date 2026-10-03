@@ -26,7 +26,7 @@ $ agentgauge .
 
 Python 3.11+. No dependencies, no account, no network access, and it never
 runs the code it reads. (Before the first PyPI release:
-`pip install git+https://github.com/PreethamNoelP/agentgauge.git@v0.2.0`.)
+`pip install git+https://github.com/PreethamNoelP/agentgauge.git@v0.3.0`.)
 
 ## What it catches
 
@@ -161,7 +161,7 @@ agentgauge gets wrong —
 **GitHub Actions**
 
 ```yaml
-- uses: PreethamNoelP/agentgauge@v0.2.0
+- uses: PreethamNoelP/agentgauge@v0.3.0
   with:
     path: .
     fail-on-incomplete: "true"
@@ -170,7 +170,7 @@ agentgauge gets wrong —
 With GitHub code scanning (findings appear on the pull request):
 
 ```yaml
-- uses: PreethamNoelP/agentgauge@v0.2.0
+- uses: PreethamNoelP/agentgauge@v0.3.0
   with:
     sarif-file: agentgauge.sarif
   continue-on-error: true
@@ -181,14 +181,14 @@ With GitHub code scanning (findings appear on the pull request):
 
 Inputs: `path`, `min-score`, `scope`, `fail-on-incomplete`, `sarif-file`,
 `config`, `no-config`. For the strictest supply-chain posture, pin the tag's
-full commit SHA instead of `v0.2.0`.
+full commit SHA instead of `v0.3.0`.
 
 **pre-commit**
 
 ```yaml
 repos:
   - repo: https://github.com/PreethamNoelP/agentgauge
-    rev: v0.2.0
+    rev: v0.3.0
     hooks:
       - id: agentgauge
         args: [--fail-on-incomplete]
@@ -294,8 +294,8 @@ code execution. Design details are in
 
 ## Project status
 
-Version 0.2 — usable today, and the rules are still being refined. Tested
-on Linux and Windows, Python 3.11–3.13: 1,185 automated tests, strict type
+Version 0.3 — usable today, and the rules are still being refined. Tested
+on Linux and Windows, Python 3.11–3.13: 1,187 automated tests, strict type
 checking, linting, the accuracy benchmark, and a build-and-install check of
 the published package, on every change.
 
