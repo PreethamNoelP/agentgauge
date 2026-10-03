@@ -603,3 +603,19 @@ def test_report_shows_tool_entry_points_and_out_of_scope_sinks(tmp_path, capsys)
     out = capsys.readouterr().out
     assert "TOOL ENTRY POINTS" in out
     assert "NOT AGENT-REACHABLE" in out
+
+
+def test_javascript_project_gets_an_explicit_unsupported_message(tmp_path, capsys):
+    (tmp_path / "server.ts").write_text("export const x = 1;\n")
+    (tmp_path / "node_modules").mkdir()
+
+    assert main([str(tmp_path)]) == 2
+    assert "JavaScript/TypeScript project" in capsys.readouterr().err
+
+
+def test_empty_python_free_directory_gets_no_javascript_hint(tmp_path, capsys):
+    (tmp_path / "notes.txt").write_text("hello\n")
+
+    assert main([str(tmp_path)]) == 2
+    assert "JavaScript" not in capsys.readouterr().err
+

@@ -163,6 +163,23 @@ def _print_warnings(report: ScanReport) -> None:
         print(f"warning: skipped {_safe(entry)}", file=sys.stderr)
 
 
+_JS_SUFFIXES = (".js", ".mjs", ".cjs", ".ts", ".mts", ".cts")
+
+
+def _has_javascript(target: Path) -> bool:
+    """True if the target holds JS/TS sources (outside the usual noise
+    directories). Stops at the first one found."""
+    from agentgauge.fswalk import SKIP_DIRS
+
+    if target.is_file():
+        return target.suffix in _JS_SUFFIXES
+    for _dirpath, dirnames, filenames in os.walk(target):
+        dirnames[:] = [d for d in dirnames if d not in SKIP_DIRS]
+        if any(name.endswith(_JS_SUFFIXES) for name in filenames):
+            return True
+    return False
+
+
 def _build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="agentgauge",
@@ -344,6 +361,12 @@ def main(argv: list[str] | None = None) -> int:
             "zero evidence",
             file=sys.stderr,
         )
+        if _has_javascript(target):
+            print(
+                "agentgauge: this looks like a JavaScript/TypeScript project; "
+                "only Python agent code is supported for now",
+                file=sys.stderr,
+            )
         return 2
 
     baseline_written = None
