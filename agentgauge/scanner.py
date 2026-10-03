@@ -182,6 +182,29 @@ def _read_source(path: Path) -> str:
 REUSE_PARSED_BYTES = 8_000_000
 
 
+def _excluded_with_sensitive_calls(
+    paths: list[Path],
+    parse: Callable[[Path, str, Callable[[str], None] | None], FileContext | None],
+    root: Path,
+    cwd: Path,
+) -> list[str]:
+    """Display paths of excluded files that contain a sensitive call.
+
+    Files are parsed one at a time and dropped, so memory stays bounded by
+    one file's AST, as in the scan itself. A file that cannot be read or
+    parsed is not reported here: it could not have been judged either way.
+    """
+    hidden = []
+    for path in paths:
+        if escapes_scan_root(path, root):
+            continue
+        rel = _display_path(path, root, cwd)
+        ctx = parse(path, rel, None)
+        if ctx is not None and ctx.candidate_sensitive_calls:
+            hidden.append(rel)
+    return hidden
+
+
 def module_name(path: Path, root: Path) -> tuple[str, bool]:
     """Dotted module name for a file, relative to the scan root, and whether
     it is a package's __init__."""
@@ -206,9 +229,13 @@ def scan(target: str | Path, config: Config | None = None) -> ScanReport:
     skipped: list[str] = []
     excluded = 0
 
-    def count_excluded(_path: Path) -> None:
+    excluded_py: list[Path] = []
+
+    def count_excluded(path: Path) -> None:
         nonlocal excluded
         excluded += 1
+        if path.suffix == ".py":
+            excluded_py.append(path)
 
     paths = list(iter_python_files(root, config.exclude, count_excluded))
 
@@ -333,4 +360,14 @@ def scan(target: str | Path, config: Config | None = None) -> ScanReport:
             f"{excluded} file(s) were not scanned because an 'exclude' pattern "
             "in the config matched them"
         )
+        # The config belongs to the scanned repository, so an exclude is
+        # also a way for it to hide a sink. Say so when that is what it hid.
+        hidden = _excluded_with_sensitive_calls(excluded_py, parse, root, cwd)
+        if hidden:
+            shown = ", ".join(hidden[:5]) + (", ..." if len(hidden) > 5 else "")
+            report.warnings.append(
+                f"{len(hidden)} excluded file(s) contain calls agentgauge "
+                f"treats as sensitive actions and were not judged: {shown}. "
+                "If you do not control this repository, rerun with --no-config"
+            )
     return report
