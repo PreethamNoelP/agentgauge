@@ -109,6 +109,10 @@ class FuncInfo:
     logs: bool
     rate: bool
     edges: list[Edge] = field(default_factory=list)
+    # The function is a decorator whose wrapper asks for approval before
+    # calling the function it wraps (see _is_approval_decorator).
+    approval_decorator: bool = False
+    decorator_refs: list[Ref] = field(default_factory=list)
 
 
 @dataclass
@@ -270,6 +274,14 @@ def summarize(ctx: "FileContext", module: str, is_package: bool = False) -> File
                     has_sink=id(stmt) in sink_scopes,
                     logs=makes_log_call(stmt, config, aliases, ctx.scope_nodes(stmt)),
                     rate=mentions_rate_limit(stmt, config, ctx.scope_nodes(stmt)),
+                    approval_decorator=_is_approval_decorator(stmt, ctx),
+                    decorator_refs=[
+                        ref for dec in stmt.decorator_list
+                        if (ref := _ref_for(
+                            dec.func if isinstance(dec, ast.Call) else dec,
+                            aliases, class_name,
+                        )) is not None
+                    ],
                 )
                 functions[key] = info
                 if parent is not None:
@@ -326,6 +338,41 @@ def summarize(ctx: "FileContext", module: str, is_package: bool = False) -> File
         aliases=aliases,
         registrations=registrations,
     )
+
+
+def _is_approval_decorator(fn: FunctionNode, ctx: "FileContext") -> bool:
+    """True if `fn` is a decorator (or decorator factory) whose wrapper calls
+    the wrapped function only behind an approval check:
+
+        def policy_checked(func):
+            def wrapper(*args, **kwargs):
+                if not request_approval(func.__name__, args):
+                    raise PermissionError
+                return func(*args, **kwargs)
+            return wrapper
+
+    The wrapped function is any parameter of `fn` or of a function nested
+    between `fn` and the wrapper (a factory's inner decorator)."""
+    from agentgauge.approval import _function_params
+
+    def search(outer: ast.AST, wrapped: frozenset[str], depth: int) -> bool:
+        for inner in ctx.direct_defs(outer):
+            if not isinstance(inner, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                continue
+            for node in ctx.scope_nodes(inner):
+                if (
+                    isinstance(node, ast.Call)
+                    and isinstance(node.func, ast.Name)
+                    and node.func.id in wrapped
+                    and ctx.approval.is_dominated(node, inner, exclude_params=False)
+                ):
+                    return True
+            if depth < 2 and search(inner, wrapped | _function_params(inner), depth + 1):
+                return True
+        return False
+
+    params = _function_params(fn)
+    return bool(params) and search(fn, params, 1)
 
 
 def _is_stub(fn: FunctionNode, aliases: dict[str, str]) -> bool:
@@ -503,8 +550,18 @@ class ProgramIndex:
                         changed = True
             return result
 
+        approval_decorators = {k for k, info in funcs.items() if info.approval_decorator}
+        decorated_by_approval = {
+            key for key, info in funcs.items()
+            if any(
+                target in approval_decorators
+                for ref in info.decorator_refs
+                for target in resolve(ref, file_of[key], None)
+            )
+        }
         gated = every_path(
-            {k for k, info in funcs.items() if info.approval_decorated},
+            {k for k, info in funcs.items() if info.approval_decorated}
+            | decorated_by_approval,
             lambda c, e: e.gated_strict if c in entries else e.gated,
         )
         protected = every_path(set(), lambda c, e: e.handled)

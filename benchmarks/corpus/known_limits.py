@@ -61,8 +61,31 @@ def gated_by_middleware(path: str) -> str:
     if not path.startswith(ROOT):
         raise ValueError("outside root")
     try:
-        # The decorator (defined elsewhere) asks a human; its name says nothing.
+        # A decorator from an unscanned library asks a human; its name says
+        # nothing and its code is not available to read.
         shutil.rmtree(path)  # known-fp: human-oversight
+    except OSError:
+        raise
+    return "done"
+
+
+def policy_checked(func):
+    """A project decorator with no approval word in its name: its wrapper
+    asks before calling the tool, and that is what agentgauge reads."""
+    def wrapper(*args, **kwargs):
+        if not request_approval(func.__name__, args):
+            raise PermissionError("denied by policy")
+        return func(*args, **kwargs)
+    return wrapper
+
+
+@mcp.tool()
+@policy_checked
+def gated_by_project_decorator(path: str) -> str:
+    if not path.startswith(ROOT):
+        raise ValueError("outside root")
+    try:
+        shutil.rmtree(path)
     except OSError:
         raise
     return "done"

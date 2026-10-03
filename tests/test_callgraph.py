@@ -296,3 +296,74 @@ def test_definitions_under_if_and_try_blocks_are_seen():
     )
     assert tools(src) == {"a", "K.b"}
 
+
+# --- approval decorators defined in the scanned code ----------------------
+
+POLICY = (
+    "import functools, shutil\n"
+    "def policy_checked(func):\n"
+    "    @functools.wraps(func)\n"
+    "    def wrapper(*args, **kwargs):\n"
+    "        if not request_approval(func.__name__, args):\n"
+    "            raise PermissionError('denied')\n"
+    "        return func(*args, **kwargs)\n"
+    "    return wrapper\n"
+)
+
+
+def test_a_decorator_whose_wrapper_asks_first_gates_the_tool():
+    ctx = ctx_of(POLICY + "@mcp.tool()\n@policy_checked\ndef wipe(p):\n    shutil.rmtree(p)\n")
+    tool = next(fn for fn in ctx.functions if fn.name == "wipe")
+    assert ctx.is_gated(tool)
+
+
+def test_a_decorator_factory_whose_wrapper_asks_first_gates_the_tool():
+    src = (
+        "import shutil\n"
+        "def policy(reason):\n"
+        "    def deco(func):\n"
+        "        def wrapper(*a):\n"
+        "            if not confirm_with_operator(reason):\n"
+        "                return None\n"
+        "            return func(*a)\n"
+        "        return wrapper\n"
+        "    return deco\n"
+        "@mcp.tool()\n@policy('wipe')\ndef wipe(p):\n    shutil.rmtree(p)\n"
+    )
+    ctx = ctx_of(src)
+    tool = next(fn for fn in ctx.functions if fn.name == "wipe")
+    assert ctx.is_gated(tool)
+
+
+@pytest.mark.parametrize("body", [
+    # calls the function first, asks afterwards
+    "        result = func(*args)\n        request_approval('x')\n        return result\n",
+    # never asks
+    "        log(args)\n        return func(*args)\n",
+    # asks, but on the refused side
+    "        if request_approval('x'):\n            return None\n        return func(*args)\n",
+])
+def test_a_decorator_that_does_not_ask_first_does_not_gate(body):
+    src = (
+        "import shutil\n"
+        "def wrap(func):\n"
+        "    def wrapper(*args):\n" + body +
+        "    return wrapper\n"
+        "@mcp.tool()\n@wrap\ndef wipe(p):\n    shutil.rmtree(p)\n"
+    )
+    ctx = ctx_of(src)
+    tool = next(fn for fn in ctx.functions if fn.name == "wipe")
+    assert not ctx.is_gated(tool)
+
+
+def test_an_approval_decorator_in_another_file_gates_the_tool(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    (tmp_path / "policy.py").write_text(POLICY)
+    (tmp_path / "server.py").write_text(
+        "import shutil\nfrom policy import policy_checked\n"
+        "@mcp.tool()\n@policy_checked\ndef wipe(path):\n"
+        "    try:\n        shutil.rmtree(path)\n    except OSError:\n        raise\n"
+    )
+    report = scan(tmp_path, Config(min_score=0))
+    assert not any(f.rule == "human-oversight" for f in report.findings)
+
