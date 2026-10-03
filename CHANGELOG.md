@@ -8,9 +8,38 @@ scanner, "breaking" includes anything that can change a repository's score
 or verdict, since that is what CI gates on — those are called out
 explicitly.
 
+## [0.4.0] — 2026-10-03
+
+The first release intended for PyPI (0.3.0 was tagged but not published).
+Every change here can change verdicts, toward finding more real issues.
+
+### Changed
+
+- **Approval polarity is checked.** A sensitive call must sit where
+  approval was *given*: `if approved(): return` before the call, `if not
+  approved(): <call>`, `answer == "no"` and `if user_declined:` no longer
+  count as gates. Unreadable conditions are still accepted rather than
+  guessed.
+- **Rate limiters must be used**: called, applied as a decorator, or
+  entered with `with`. A name that is only assigned, a parameter or a
+  keyword argument no longer passes.
+
+### Added
+
+- **Sinks without a static name:** calls through a dispatch table holding a
+  sensitive function (`ACTIONS[name](p)`, `ACTIONS.get(name)(p)`), and
+  computed attributes on dangerous modules (`getattr(os, name)(cmd)`). The
+  parameter choosing the function is an unvalidated input too.
+- **Approval decorators recognized by behavior:** a decorator or decorator
+  factory in the scanned code whose wrapper asks before calling the wrapped
+  function gates every function it decorates, in any file, whatever its
+  name.
+- Benchmark: every former known miss is now detected. 84.7% precision,
+  100% recall on the corpus, 14/14 critical verdicts.
+
 ## [0.3.0] — 2026-10-03
 
-The first release intended for PyPI.
+Tagged, not published to PyPI.
 
 ### Changed
 

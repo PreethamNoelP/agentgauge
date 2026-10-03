@@ -14,11 +14,11 @@ $ python benchmarks/run.py --corpus path/to/your/labelled/corpus
 
 | Rule | TP | FP | FN | Precision | Recall |
 |---|---:|---:|---:|---:|---:|
-| human-oversight | 19 | 5 | 3 | 79.2% | 86.4% |
-| input-validation | 11 | 3 | 0 | 78.6% | 100.0% |
+| human-oversight | 22 | 5 | 0 | 81.5% | 100.0% |
+| input-validation | 13 | 3 | 0 | 81.2% | 100.0% |
 | error-handling | 13 | 1 | 0 | 92.9% | 100.0% |
 | permissive-defaults | 2 | 0 | 0 | 100.0% | 100.0% |
-| all measured rules | 45 | 9 | 3 | 83.3% | 93.8% |
+| all measured rules | 50 | 9 | 0 | 84.7% | 100.0% |
 
 Critical-verdict accuracy: 14/14 scan units (100.0%).
 
@@ -36,7 +36,9 @@ It is **not** a sample of real-world repositories, so these numbers say how
 the rules behave on the patterns the corpus covers, not how often those
 patterns occur in the wild. Two consequences:
 
-- The corpus is small (14 scan units, 57 labelled sites). One more case can
+- The corpus is small (14 scan units, 59 labelled sites). 100% recall
+  here means agentgauge finds every issue *in this corpus*, including the
+  hard cases it used to miss — not that it finds every issue anywhere. One more case can
   move a percentage by several points.
 - It was written by the same people who wrote the rules. The defence is in
   how labels are assigned (below), and in `known_limits.py`, which exists to
@@ -78,14 +80,14 @@ rule's own definition; they are covered by the unit tests instead.
 
 ## Where agentgauge is wrong today
 
-From `known_limits.py` and the `known-fp` labels elsewhere:
+From `known_limits.py` and the `known-fp` labels elsewhere. Backwards
+approval checks, dispatch-table sinks, computed `getattr` names and
+approval decorators defined in the project used to be on this list; they
+are detected now and kept in the corpus as expected findings.
 
 | Case | Effect |
 |---|---|
-| `if approved(): return` before the sink (wrong polarity) | missed: the sink runs exactly when approval was refused |
-| a sink looked up in a dict (`ACTIONS[name](p)`) | missed |
-| `getattr(os, name)` with a non-constant name | missed |
-| approval enforced by a decorator whose name says nothing (`@guarded_by_policy_service`) | false positive |
+| approval enforced by a decorator from an unscanned library whose name says nothing (`@guarded_by_policy_service`) | false positive |
 | a validator with an unrecognized name (`normalize_under_root`) | false positive |
 | a fixed, read-only subprocess call (`git status`, `git log`) | false positive |
 | a validated read-only SQL query, or an allowlisted `PRAGMA` | false positive |
