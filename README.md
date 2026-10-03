@@ -4,15 +4,18 @@
 
 **Find the dangerous things your AI agent can do without asking a human.**
 
-A static scanner for MCP servers and AI-agent tool code. It finds every function a model can call, follows what those functions do across your repository, and flags destructive actions — deleting files, running commands, executing SQL, moving money — that have no human approval, logging, limits or input validation in front of them.
-
 [![CI](https://github.com/PreethamNoelP/agentgauge/actions/workflows/ci.yml/badge.svg)](https://github.com/PreethamNoelP/agentgauge/actions/workflows/ci.yml)
-[![PyPI](https://img.shields.io/pypi/v/agentgauge)](https://pypi.org/project/agentgauge/)
 ![Python](https://img.shields.io/badge/python-3.11%20%7C%203.12%20%7C%203.13-blue)
 ![Dependencies](https://img.shields.io/badge/dependencies-zero-brightgreen)
 [![License](https://img.shields.io/badge/license-Apache--2.0-blue)](https://github.com/PreethamNoelP/agentgauge/blob/main/LICENSE)
 
 </div>
+
+agentgauge is a static scanner for MCP servers and AI-agent tool code. It
+finds every function a model can call, follows what those functions do
+across your repository, and flags destructive actions — deleting files,
+running commands, executing SQL, moving money — that have no human
+approval, logging, limits or input validation in front of them.
 
 ---
 
@@ -48,20 +51,22 @@ def delete_note(name: str) -> str:
 ```console
 $ agentgauge .
 
-  Human oversight                      0.0 / 25  (0/3 sites passed)
-  Tool scope & input validation        0.0 / 15  (0/2 sites passed)
+  Human oversight                 0.0 / 25   (0/3 sites passed)
+  Tool scope & input validation   0.0 / 15   (0/2 sites passed)
   ...
-  GOVERNANCE SCORE                    10.0 / 100
-  VERDICT                           FAIL_CRITICAL
+  GOVERNANCE SCORE               10.0 / 100
+  VERDICT                        FAIL_CRITICAL
 
   src/notes_mcp/server.py:18  [input-validation]
-    parameter 'name' of tool 'read_note' reaches a file path or sensitive call without validation
-    fix: Validate before use: an allowlist or containment check (`if not Path(path).resolve().is_relative_to(ROOT): raise`), ...
+    parameter 'name' of tool 'read_note' reaches a file path
+    or sensitive call without validation
 
   src/notes_mcp/server.py:26  [human-oversight]
-    file delete call 'os.remove' in 'delete_note' has no human-approval check before it
-    fix: Gate the call behind an explicit approval that runs first, e.g. `if not await request_approval(...): return` before it executes
+    file delete call 'os.remove' in 'delete_note' has no
+    human-approval check before it
 ```
+
+*(Output shortened. Every finding also carries a concrete fix.)*
 
 Any model connected to that server — or any prompt injection reaching it —
 can read `../../.ssh/id_rsa` and delete files without anyone being asked.
@@ -93,14 +98,22 @@ Six questions, for every action a model can reach:
 | Input validation | 15 | Are paths, commands, queries and URLs validated before use? |
 | Permissive defaults | 10 | Is `auto_approve=True` or `verify=False` set in code or an MCP client config? |
 
-Destructive actions it recognizes: file deletion, shell and process
-execution, `eval`/`exec`/unsafe deserialization, dynamic SQL, payments
-(Stripe-style SDKs and payment-API HTTP calls), and remote deletes (cloud
-storage, databases, Kubernetes).
+**Destructive actions it recognizes**
 
-Frameworks it understands: MCP (FastMCP and the low-level SDK), LangChain,
-OpenAI Agents SDK, LlamaIndex, Pydantic AI, AutoGen, Semantic Kernel, and
-class-based tools. Others can be taught with one line of config.
+- File deletion
+- Shell and process execution
+- `eval`, `exec` and unsafe deserialization
+- Dynamic SQL
+- Payments (Stripe-style SDKs and payment-API HTTP calls)
+- Remote deletes (cloud storage, databases, Kubernetes)
+
+**Frameworks it understands**
+
+- MCP (FastMCP and the low-level SDK)
+- LangChain, LlamaIndex
+- OpenAI Agents SDK, Pydantic AI
+- AutoGen, Semantic Kernel
+- Class-based tools — and any other framework, with one line of config
 
 ## The verdict
 
@@ -197,16 +210,22 @@ repos:
 ## Command line
 
 ```console
-$ agentgauge .                              # scan from the repository root
-$ agentgauge src/server.py                  # a single file
-$ agentgauge . --json                       # machine-readable report
-$ agentgauge . --sarif > agentgauge.sarif   # SARIF 2.1.0 for code scanning
-$ agentgauge . --min-score 80               # stricter threshold (0 disables)
-$ agentgauge . --fail-on-incomplete         # treat reduced coverage as failure
-$ agentgauge . --no-config                  # ignore the repo's own settings
-$ agentgauge . --scope all                  # judge every function with a sink
-$ agentgauge . --baseline base.json --update-baseline   # record today's findings
-$ agentgauge . --baseline base.json         # then fail only on new ones
+$ agentgauge .                     # scan from the repository root
+$ agentgauge src/server.py         # a single file
+$ agentgauge . --json              # machine-readable report
+$ agentgauge . --sarif > out.sarif # SARIF for code scanning
+$ agentgauge . --min-score 80      # stricter threshold (0 disables)
+$ agentgauge . --fail-on-incomplete
+$ agentgauge . --no-config         # ignore the repo's own settings
+$ agentgauge . --scope all         # judge every function with a sink
+```
+
+Adopting it on an existing project? Record today's findings, then fail
+only on new ones:
+
+```console
+$ agentgauge . --baseline base.json --update-baseline
+$ agentgauge . --baseline base.json
 ```
 
 Run it from the repository root, so reported paths match what code scanning
@@ -220,15 +239,20 @@ Optional, in `pyproject.toml`:
 [tool.agentgauge]
 min_score = 70
 exclude = ["tests/*", "scripts/"]
-extra_tool_decorators = ["expose"]         # your framework's tool decorator
-extra_approval_markers = ["greenlight"]    # your approval helper's name
-assume_external_rate_limiting = true       # a gateway limits calls
 
+# Teach it your framework and your approval helper
+extra_tool_decorators = ["expose"]
+extra_approval_markers = ["greenlight"]
+
+# A gateway already rate-limits calls
+assume_external_rate_limiting = true
+
+# A reviewed exception, with a reason every report repeats
 [[tool.agentgauge.accepted_risks]]
 rule = "human-oversight"
 file = "src/server.py"
 function = "rebuild_index"
-reason = "Runs a fixed make target; no model input reaches it (SEC-142)"
+reason = "Fixed make target; no model input (SEC-142)"
 ```
 
 Settings are validated strictly: a typo, an unknown rule, or a setting that
@@ -242,7 +266,7 @@ reference:
 
 Yes, including on code you don't trust:
 
-| | |
+| Area | Behavior |
 |---|---|
 | **Network** | None. It imports only the Python standard library: `argparse, ast, collections, dataclasses, fnmatch, functools, hashlib, io, json, os, pathlib, re, sys, tokenize, tomllib, typing`. No HTTP client, telemetry or update check. |
 | **Code execution** | None. Scanned code is parsed, never imported or run. |
@@ -316,7 +340,9 @@ and the
 
 ## License
 
+Released under the
 [Apache License 2.0](https://github.com/PreethamNoelP/agentgauge/blob/main/LICENSE).
-Created by **Preetham Noel P** —
-[GitHub](https://github.com/PreethamNoelP) ·
-[LinkedIn](https://www.linkedin.com/in/preethamnoelp)
+
+---
+
+Created by **Preetham Noel P** · [GitHub](https://github.com/PreethamNoelP) · [LinkedIn](https://www.linkedin.com/in/preethamnoelp)
