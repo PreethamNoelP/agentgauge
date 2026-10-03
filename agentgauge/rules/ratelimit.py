@@ -1,19 +1,24 @@
 """Rule 3 of 6: Rate limiting (15 points).
 
-Every tool entry point must reference rate-limiting vocabulary -- in its
-body, its decorators, or a function it calls: an identifier containing
-"ratelimit", "throttle" or "limiter" (underscores ignored), or the
-ratelimit library's @limits decorator. Reference-based: the rule confirms
-the vocabulary is present, not that the limiter is configured correctly.
+Every tool entry point must *use* a rate limiter -- in its body, its
+decorators, or a function it calls. Use means the limiter is called
+(`limiter.acquire()`, `await throttle.wait()`), applied as a decorator
+(`@limiter.limit("10/minute")`, the ratelimit library's `@limits`), or
+entered as a context manager (`async with rate_limiter:`). A name that is
+only assigned (`rate_limiter = None`), declared as a parameter, or passed
+as a keyword does not count. Limiter vocabulary: identifiers containing
+"ratelimit", "throttle" or "limiter" (underscores ignored), plus
+`extra_rate_limit_markers`.
 
+The rule confirms a limiter is invoked, not that its limits are sensible.
 `assume_external_rate_limiting = true` marks the category not applicable
 when a gateway limits calls outside the scanned code.
 """
 
 import ast
-from collections.abc import Iterable
+from collections.abc import Iterable, Iterator
 
-from agentgauge.astutils import FileContext, iter_identifiers
+from agentgauge.astutils import FileContext
 from agentgauge.config import RuleConfig
 from agentgauge.models import Finding
 
@@ -29,17 +34,14 @@ RATE_MARKERS = ("ratelimit", "throttle", "limiter")
 def mentions_rate_limit(
     fn: ast.AST, config: RuleConfig, scope: Iterable[ast.AST] | None = None
 ) -> bool:
-    """True if `fn` references rate-limit vocabulary. With `scope` (the
-    function's own-scope nodes), nested defs are skipped -- the call-graph
-    summary covers those separately."""
+    """True if `fn` uses a rate limiter (see the module docstring). With
+    `scope` (the function's own-scope nodes), nested defs are skipped -- the
+    call-graph summary covers those separately."""
     # Config entries are collapsed the same way identifiers are, so
     # "rate_limit" still matches "rate_limit_check".
     markers = RATE_MARKERS + tuple(m.replace("_", "") for m in config.rate_markers)
-    idents = (
-        (ident for node in scope for ident in _node_identifiers(node))
-        if scope is not None else iter_identifiers(fn)
-    )
-    for ident in idents:
+    nodes = scope if scope is not None else ast.walk(fn)
+    for ident in _used_identifiers(nodes):
         collapsed = ident.lower().replace("_", "")
         if collapsed == "limits":  # the ratelimit library's @limits decorator
             return True
@@ -48,18 +50,35 @@ def mentions_rate_limit(
     return False
 
 
-def _node_identifiers(node: ast.AST) -> list[str]:
-    if isinstance(node, ast.Name):
-        return [node.id]
-    if isinstance(node, ast.Attribute):
-        return [node.attr]
-    if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
-        return [node.name]
-    if isinstance(node, ast.arg):
-        return [node.arg]
-    if isinstance(node, ast.keyword) and node.arg is not None:
-        return [node.arg]
-    return []
+def _chain_identifiers(expr: ast.AST) -> list[str]:
+    """Names along a callee or decorator expression: `self.limiter.acquire`
+    gives self, limiter, acquire; `limiter.limit("10/m")` gives limiter,
+    limit."""
+    names: list[str] = []
+    while True:
+        if isinstance(expr, ast.Call):
+            expr = expr.func
+        elif isinstance(expr, ast.Attribute):
+            names.append(expr.attr)
+            expr = expr.value
+        elif isinstance(expr, ast.Subscript):
+            expr = expr.value
+        elif isinstance(expr, ast.Name):
+            names.append(expr.id)
+            return names
+        else:
+            return names
+
+
+def _used_identifiers(nodes: Iterable[ast.AST]) -> Iterator[str]:
+    for node in nodes:
+        if isinstance(node, ast.Call):
+            yield from _chain_identifiers(node.func)
+        elif isinstance(node, ast.withitem):
+            yield from _chain_identifiers(node.context_expr)
+        elif isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            for dec in node.decorator_list:
+                yield from _chain_identifiers(dec)
 
 
 def check(ctx: FileContext) -> tuple[int, int, list[Finding]]:
