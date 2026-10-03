@@ -145,3 +145,32 @@ def test_approval_names(name):
 ])
 def test_non_approval_names(name):
     assert not is_approval_name(name)
+
+
+# --- polarity: the call must be on the approved side ----------------------
+
+@pytest.mark.parametrize("body", [
+    # acts exactly when approval was refused
+    "if request_approval(path):\n    return 'ok'\nshutil.rmtree(path)",
+    "if not request_approval(path):\n    shutil.rmtree(path)",
+    "answer = input('ok? ')\nif answer == 'no':\n    shutil.rmtree(path)",
+    "result = await ctx.elicit('Delete?')\nif result.action == 'accept':\n    return\nshutil.rmtree(path)",
+    "if user_declined_approval(path):\n    shutil.rmtree(path)",
+    "assert not request_approval(path)\nshutil.rmtree(path)",
+    "if request_approval(path):\n    pass\nelse:\n    shutil.rmtree(path)",
+])
+def test_call_on_the_refused_side_is_not_gated(body):
+    sites, passed, _ = judge(body, params="path, ctx: Context")
+    assert passed < sites
+
+
+@pytest.mark.parametrize("body", [
+    "result = await ctx.elicit('Delete?')\nif result.action != 'accept':\n    return\nshutil.rmtree(path)",
+    "answer = input('ok? ')\nif answer != 'y':\n    raise SystemExit\nshutil.rmtree(path)",
+    "if request_approval(path) is False:\n    return\nshutil.rmtree(path)",
+    "if not request_approval(path):\n    return\nelse:\n    shutil.rmtree(path)",
+    "if request_approval(path):\n    shutil.rmtree(path)\nelse:\n    return",
+])
+def test_call_on_the_approved_side_is_gated(body):
+    assert gated(body, params="path, ctx: Context")
+

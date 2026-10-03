@@ -23,8 +23,8 @@ def wrong_polarity(path: str) -> str:
     if request_approval(f"delete {path}"):
         return "approved, then returns without acting"
     try:
-        # Runs exactly when approval was refused. Polarity is not checked.
-        shutil.rmtree(path)  # known-miss: human-oversight
+        # Runs exactly when approval was refused: caught by polarity checks.
+        shutil.rmtree(path)  # expect: human-oversight
     except OSError:
         raise
     return "done"

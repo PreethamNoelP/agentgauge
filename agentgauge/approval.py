@@ -23,8 +23,15 @@ because none of them is evidence that a human decided anything:
     is chosen by the model, so `if confirm:` on a `confirm` parameter is
     the model approving itself.
 
-Known limits: polarity is not checked (`if approved(): return` before the
-sink passes), and a value is not traced further than one assignment.
+Polarity is checked: a condition is read as true-when-approved (`if
+approved:`, `answer == "y"`) or true-when-refused (`if not approved:`,
+`result.action != "accept"`, `answer == "no"`, `if user_declined:`), and
+the sensitive call must sit on the approved side -- so `if approved():
+return` before the call, which acts exactly when approval was refused, is
+not a gate. A condition whose polarity cannot be read is accepted either
+way rather than guessed.
+
+Known limit: a value is not traced further than two assignments.
 """
 
 import ast
@@ -42,6 +49,14 @@ APPROVAL_PHRASES = (
     "requesthuman", "manualreview", "signoff", "elicit",
 )
 EXIT_CALLS = frozenset({"sys.exit", "os._exit", "exit", "quit"})
+
+# Words that make a condition true when approval was refused.
+DENIAL_WORDS = frozenset({
+    "decline", "declined", "deny", "denied", "reject", "rejected", "refuse",
+    "refused", "cancel", "cancelled", "canceled", "abort", "aborted", "no",
+    "n", "false", "veto", "vetoed",
+})
+APPROVED, UNKNOWN, REFUSED = 1, 0, -1
 
 
 def collapse(name: str) -> str:
@@ -275,12 +290,67 @@ class ApprovalAnalyzer:
 
     # -- dominance -----------------------------------------------------
 
+    # -- polarity --------------------------------------------------------
+
+    def _polarity(self, test: ast.AST, facts: _Facts) -> int:
+        """APPROVED if `test` is true when approval was given, REFUSED if it
+        is true when approval was refused, UNKNOWN if it cannot be read."""
+        if isinstance(test, ast.UnaryOp) and isinstance(test.op, ast.Not):
+            return -self._polarity(test.operand, facts)
+        if isinstance(test, ast.Await):
+            return self._polarity(test.value, facts)
+        if isinstance(test, ast.BoolOp):
+            parts = {
+                self._polarity(v, facts) for v in test.values if self._mentions(v, facts)
+            }
+            return parts.pop() if len(parts) == 1 else UNKNOWN
+        if isinstance(test, ast.Compare) and len(test.ops) == 1:
+            op, right = test.ops[0], test.comparators[0]
+            constant = right if isinstance(right, ast.Constant) else (
+                test.left if isinstance(test.left, ast.Constant) else None
+            )
+            if constant is None:
+                return UNKNOWN
+            value = constant.value
+            refusal = value in (False, None, 0) or (
+                isinstance(value, str) and value.strip().lower() in DENIAL_WORDS
+            )
+            if isinstance(op, (ast.Eq, ast.Is, ast.In)):
+                return REFUSED if refusal else APPROVED
+            if isinstance(op, (ast.NotEq, ast.IsNot, ast.NotIn)):
+                return APPROVED if refusal else REFUSED
+            return UNKNOWN
+        if isinstance(test, (ast.Name, ast.Attribute, ast.Call)):
+            words = set()
+            for node in ast.walk(test):
+                name = (
+                    node.id if isinstance(node, ast.Name)
+                    else node.attr if isinstance(node, ast.Attribute) else None
+                )
+                if name:
+                    words |= {w for w in name.lower().replace("-", "_").split("_") if w}
+            return REFUSED if words & DENIAL_WORDS else APPROVED
+        return UNKNOWN
+
+    def _approves(self, test: ast.AST, facts: _Facts, when_true: bool) -> bool:
+        """True if `test` mentions approval and the branch taken when it is
+        `when_true` is the approved one (or polarity is unknown)."""
+        if not self._mentions(test, facts):
+            return False
+        polarity = self._polarity(test, facts)
+        return polarity != (REFUSED if when_true else APPROVED)
+
     def _is_guard(self, stmt: ast.stmt, facts: _Facts) -> bool:
+        """A statement after which execution continues only if approved."""
         if isinstance(stmt, ast.Assert):
-            return self._mentions(stmt.test, facts)
+            return self._approves(stmt.test, facts, when_true=True)
         if isinstance(stmt, ast.If):
-            return self._mentions(stmt.test, facts) and (
-                _terminates(stmt.body) or _terminates(stmt.orelse)
+            # The body exits: execution continues when the test is false, so
+            # the false side must be the approved one -- and vice versa.
+            return (
+                _terminates(stmt.body) and self._approves(stmt.test, facts, when_true=False)
+            ) or (
+                _terminates(stmt.orelse) and self._approves(stmt.test, facts, when_true=True)
             )
         if isinstance(stmt, ast.Expr):
             value = stmt.value
@@ -317,14 +387,18 @@ class ApprovalAnalyzer:
         child: ast.AST = node
         parent = self.parents.get(child)
         while parent is not None:
-            if isinstance(parent, (ast.If, ast.While, ast.IfExp)):
-                if child is not parent.test and self._mentions(parent.test, facts):
+            if isinstance(parent, (ast.If, ast.While, ast.IfExp)) and child is not parent.test:
+                in_true_branch = (
+                    child is parent.body if isinstance(parent, ast.IfExp)
+                    else any(s is child for s in parent.body)
+                )
+                if self._approves(parent.test, facts, when_true=in_true_branch):
                     return True
             elif isinstance(parent, ast.BoolOp) and isinstance(parent.op, ast.And):
                 for value in parent.values:
                     if value is child:
                         break
-                    if self._mentions(value, facts):
+                    if self._approves(value, facts, when_true=True):
                         return True
             elif isinstance(parent, (ast.With, ast.AsyncWith)):
                 if any(s is child for s in parent.body) and any(
@@ -334,7 +408,7 @@ class ApprovalAnalyzer:
             elif isinstance(
                 parent, (ast.ListComp, ast.SetComp, ast.GeneratorExp, ast.DictComp)
             ) and any(
-                self._mentions(cond, facts)
+                self._approves(cond, facts, when_true=True)
                 for gen in parent.generators
                 for cond in gen.ifs
             ):
