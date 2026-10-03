@@ -2,174 +2,163 @@
 
 # 🛡️ agentgauge
 
-**A zero-dependency static scanner for MCP servers and AI-agent tool code: does every action a model can trigger have a human, a log, a limit and a validated input in front of it?**
+**Find the dangerous things your AI agent can do without asking a human.**
+
+A static scanner for MCP servers and AI-agent tool code. It finds every function a model can call, follows what those functions do across your repository, and flags destructive actions — deleting files, running commands, executing SQL, moving money — that have no human approval, logging, limits or input validation in front of them.
 
 [![CI](https://github.com/PreethamNoelP/agentgauge/actions/workflows/ci.yml/badge.svg)](https://github.com/PreethamNoelP/agentgauge/actions/workflows/ci.yml)
+[![PyPI](https://img.shields.io/pypi/v/agentgauge)](https://pypi.org/project/agentgauge/)
 ![Python](https://img.shields.io/badge/python-3.11%20%7C%203.12%20%7C%203.13-blue)
 ![Dependencies](https://img.shields.io/badge/dependencies-zero-brightgreen)
-![License](https://img.shields.io/badge/license-MIT-green)
+[![License](https://img.shields.io/badge/license-Apache--2.0-blue)](https://github.com/PreethamNoelP/agentgauge/blob/main/LICENSE)
 
 </div>
 
 ---
 
-## What it does
-
-agentgauge finds the functions a model can call — MCP tools, LangChain,
-OpenAI Agents SDK, LlamaIndex, Pydantic AI, AutoGen and Semantic Kernel
-tools — follows everything they call across your repository, and checks
-each destructive action it reaches:
+## Quick start
 
 ```console
-$ agentgauge tests/fixtures/vulnerable_server.py
-
-  Human oversight                      0.0 / 25  (0/24 sites passed)
-  Audit logging                        0.0 / 20  (0/25 sites passed)
-  Rate limiting                        0.0 / 15  (0/25 sites passed)
-  Error handling                       0.0 / 15  (0/25 sites passed)
-  Tool scope & input validation        0.0 / 15  (0/22 sites passed)
-  Permissive defaults                  0.0 / 10  (0/2 sites passed)
-  ----------------------------------------------------------
-  GOVERNANCE SCORE                     0.0 / 100
-  VERDICT                           FAIL_CRITICAL
-  APPLICABLE SITES                  123
-  PASS THRESHOLD                    70
-  TOOL ENTRY POINTS                 25
-  NOT AGENT-REACHABLE               1 sensitive call(s), not judged
-
-  tests/fixtures/vulnerable_server.py:91  [human-oversight]
-    file delete call 'shutil.rmtree' in 'model_confirms_itself' is gated only by a tool argument, which the model chooses
-    fix: Get the approval from a human, not from the tool's input: MCP elicitation (`await ctx.elicit(...)`), a confirmation UI, or an approval service checked before the call
-  ...
+$ pip install agentgauge
+$ cd your-project
+$ agentgauge .
 ```
 
-It never executes the code it reads: `ast.parse` and `tokenize` only.
+Python 3.11+. No dependencies, no account, no network access, and it never
+runs the code it reads. (Before the first PyPI release:
+`pip install git+https://github.com/PreethamNoelP/agentgauge.git@v0.2.0`.)
 
-## Why it is built this way
+## What it catches
 
-**Only agent-reachable code is judged.** A `subprocess.run` in a build
-script is not an agent risk; one reached from an `@mcp.tool()` is, even
-three helper calls and two files away. agentgauge builds a whole-program
-call graph from the recognized tool entry points and judges exactly what
-they reach. Everything else is counted and reported as not agent-reachable,
-not judged. On `pip`, `requests` and `black` it reports zero critical
-findings and says no tool entry points were recognized (`INCOMPLETE`),
-instead of failing them for their own cache and build code.
+A notes server written the way MCP tutorials teach:
 
-**Approval has to come first, from a human.** A sensitive call passes only
-when an approval check *dominates* it — an enclosing condition, an earlier
-guard (`if not await ctx.elicit(...)... return`), an approval decorator, or
-the same at every call site of the helper that contains it. None of these
-count: a check placed after the call, a tool argument named `confirm` (the
-model sets it), `approved = True`, `if settings.auto_approve:`, machine
-authorization (`is_authorized`), or vocabulary lookalikes (`humanize`).
+```python
+NOTES = Path.home() / "notes"
 
-**A verdict, not just a score.** The 0–100 score averages every site, so one
-ungated payment hides behind ninety-nine governed ones. The verdict cannot
-be averaged:
+@mcp.tool()
+def read_note(name: str) -> str:
+    return (NOTES / name).read_text()
 
-| Verdict | Meaning | Exit |
-|---|---|---|
-| `FAIL_CRITICAL` | an agent-reachable file delete, shell or code exec, dynamic SQL, payment or remote delete has no approval check before it | 1 |
-| `FAIL_SCORE` | no critical finding, but the score is below the threshold (default 70) | 1 |
-| `INCOMPLETE` | a file could not be parsed, the oversight rule is disabled, nothing applicable was found, or no tool was recognized | 0 (1 with `--fail-on-incomplete`) |
-| `PASS` | none of the above | 0 |
+@mcp.tool()
+def delete_note(name: str) -> str:
+    os.remove(NOTES / name)
+    return "deleted"
+```
 
-Neither an inline suppression nor a baseline clears a critical finding. A
-reviewed `accepted_risks` entry in config does — with a mandatory written
-reason that every report repeats.
+```console
+$ agentgauge .
 
-**Measured, including where it is wrong.** A labelled benchmark corpus runs
-in CI and fails the build if results drift from the labels in either
-direction. Current numbers, over the four rules a reviewer can judge
-independently:
+  Human oversight                      0.0 / 25  (0/3 sites passed)
+  Tool scope & input validation        0.0 / 15  (0/2 sites passed)
+  ...
+  GOVERNANCE SCORE                    10.0 / 100
+  VERDICT                           FAIL_CRITICAL
 
-| Rule | Precision | Recall |
-|---|---:|---:|
-| human-oversight | 77.3% | 85.0% |
-| input-validation | 81.8% | 100.0% |
-| error-handling | 91.7% | 100.0% |
-| permissive-defaults | 100.0% | 100.0% |
-| **all measured rules** | **83.0%** | **92.9%** |
+  src/notes_mcp/server.py:18  [input-validation]
+    parameter 'name' of tool 'read_note' reaches a file path or sensitive call without validation
+    fix: Validate before use: an allowlist or containment check (`if not Path(path).resolve().is_relative_to(ROOT): raise`), ...
 
-Critical-verdict accuracy 13/13. The corpus is written for the benchmark in
-the shape of real servers, not sampled from the wild, and it includes the
-cases agentgauge gets wrong today — see
-[benchmarks/README.md](benchmarks/README.md) for exactly what that means.
+  src/notes_mcp/server.py:26  [human-oversight]
+    file delete call 'os.remove' in 'delete_note' has no human-approval check before it
+    fix: Gate the call behind an explicit approval that runs first, e.g. `if not await request_approval(...): return` before it executes
+```
 
-## The six categories
+Any model connected to that server — or any prompt injection reaching it —
+can read `../../.ssh/id_rsa` and delete files without anyone being asked.
+agentgauge says so, at the exact line, with the fix.
+
+## Who it is for
+
+- **Developers building MCP servers or agent tools** — catch the risky
+  patterns before you publish or deploy.
+- **Teams adopting AI agents** — one rule for every repository: nothing an
+  agent can trigger deletes, executes or pays without a human check, a log
+  and sensible limits. Enforced in CI on every pull request.
+- **Security and platform teams** — a zero-dependency, offline, read-only
+  tool you can approve quickly, with SARIF output for GitHub code scanning
+  and a written trail of every accepted risk.
+- **Anyone evaluating a third-party MCP server** before installing it:
+  `agentgauge --no-config path/to/server`.
+
+## What it checks
+
+Six questions, for every action a model can reach:
 
 | Category | Weight | The question |
 |---|---|---|
-| Human oversight | 25 | Is every reachable destructive action preceded by a human approval? |
+| Human oversight | 25 | Is every destructive action preceded by a human approval? |
 | Audit logging | 20 | Does every tool, or something it calls, record what it did? |
-| Rate limiting | 15 | Is every tool behind a limiter, or a declared external one? |
-| Error handling | 15 | Are destructive actions' failures handled — not swallowed — and can agent loops end? |
-| Input validation | 15 | Are risky inputs (paths, commands, queries, URLs — parameters, Pydantic fields, `arguments[...]`) validated before use? |
-| Permissive defaults | 10 | Is `auto_approve=True` / `verify=False` set in code or in an MCP client config file? |
+| Rate limiting | 15 | Is every tool behind a limiter (or a declared gateway)? |
+| Error handling | 15 | Are failures handled — not swallowed — and can agent loops end? |
+| Input validation | 15 | Are paths, commands, queries and URLs validated before use? |
+| Permissive defaults | 10 | Is `auto_approve=True` or `verify=False` set in code or an MCP client config? |
 
-Every heuristic, its evidence and its known blind spots are in
-[RULES.md](RULES.md).
+Destructive actions it recognizes: file deletion, shell and process
+execution, `eval`/`exec`/unsafe deserialization, dynamic SQL, payments
+(Stripe-style SDKs and payment-API HTTP calls), and remote deletes (cloud
+storage, databases, Kubernetes).
 
-## Installation
+Frameworks it understands: MCP (FastMCP and the low-level SDK), LangChain,
+OpenAI Agents SDK, LlamaIndex, Pydantic AI, AutoGen, Semantic Kernel, and
+class-based tools. Others can be taught with one line of config.
 
-Python 3.11+, nothing else.
+## The verdict
 
-```console
-$ pip install git+https://github.com/PreethamNoelP/agentgauge.git
-$ agentgauge --version
-```
+| Verdict | Meaning | Exit code |
+|---|---|---|
+| `FAIL_CRITICAL` | a destructive action a model can reach has no human approval before it | 1 |
+| `FAIL_SCORE` | nothing critical, but the score is below the threshold (default 70) | 1 |
+| `INCOMPLETE` | the scan could not judge everything: an unparseable file, no recognizable tools, or nothing to check | 0, or 1 with `--fail-on-incomplete` |
+| `PASS` | none of the above | 0 |
 
-## Usage
+The 0–100 score is a trend line. The verdict is what belongs in CI: one
+ungated payment cannot hide behind ninety-nine safe tools, and neither an
+inline `# agentgauge: ignore` nor a baseline can clear a critical finding.
+Only a reviewed `accepted_risks` entry can — with a written reason that
+every report repeats.
 
-```console
-$ agentgauge .                              # scan from the repository root
-$ agentgauge src/server.py                  # a single file
-$ agentgauge . --json                       # machine-readable report
-$ agentgauge . --sarif > agentgauge.sarif   # GitHub/GitLab code scanning
-$ agentgauge . --min-score 80               # stricter PASS threshold (0 disables)
-$ agentgauge . --fail-on-incomplete         # treat reduced coverage as a failure
-$ agentgauge . --scope all                  # judge every function with a sink
-$ agentgauge . --baseline base.json --update-baseline   # record today's findings
-$ agentgauge . --baseline base.json         # fail only on new findings
-```
+## How it decides
 
-Run from the repository root: reported paths are relative to the working
-directory, which is what a SARIF upload needs.
+- **Only code an agent can reach is judged.** A `subprocess.run` in your
+  build script is not an agent risk; one reached from an `@mcp.tool()` is,
+  even three helper calls and two files away. On `pip`, `requests` and
+  `black`, agentgauge reports zero critical findings.
+- **Approval must come first, and from a human.** It has to run before the
+  action, on the way to it. A check placed after the action does not count,
+  nor does a tool argument named `confirm` (the model sets it), nor
+  `approved = True`, nor `if settings.auto_approve:`, nor a permission
+  check like `is_authorized()`. MCP elicitation (`await ctx.elicit(...)`)
+  does.
+- **Inputs are found by where they go, not only by their name.** A
+  parameter called `name` that ends up in a file path is checked exactly
+  like one called `path`.
 
-### Configuration
+The full rules, with every known blind spot:
+[RULES.md](https://github.com/PreethamNoelP/agentgauge/blob/main/RULES.md).
 
-`[tool.agentgauge]` in `pyproject.toml` next to the scan target:
+## How accurate it is
 
-```toml
-[tool.agentgauge]
-min_score = 70
-exclude = ["tests/*", "scripts/"]
-extra_tool_decorators = ["expose"]         # your framework's tool decorator
-extra_approval_markers = ["greenlight"]    # your approval helper's vocabulary
-assume_external_rate_limiting = true       # a gateway limits calls
+A labelled benchmark runs in CI and fails the build if results drift from
+the labels in either direction:
 
-[[tool.agentgauge.accepted_risks]]
-rule = "human-oversight"
-file = "src/server.py"
-function = "rebuild_index"
-reason = "Runs a fixed make target; no model input reaches it (SEC-142)"
-```
+| Rule | Precision | Recall |
+|---|---:|---:|
+| human-oversight | 79.2% | 86.4% |
+| input-validation | 78.6% | 100.0% |
+| error-handling | 92.9% | 100.0% |
+| permissive-defaults | 100.0% | 100.0% |
+| **all measured rules** | **83.3%** | **93.8%** |
 
-Validation is strict: an unknown key, a typo'd rule id, a vocabulary entry
-that would match almost everything, or an approval marker that matches a
-sink's own name (`"run"`) is an error, not a silent no-op. The full
-reference is in [RULES.md](RULES.md#configuration).
+Critical verdict correct for 14 of 14 test projects. *Precision*: how often
+a finding is a real problem. *Recall*: how many real problems it finds. The
+benchmark projects are written in the shape of real servers rather than
+taken from real repositories, and they deliberately include the cases
+agentgauge gets wrong —
+[benchmarks/README.md](https://github.com/PreethamNoelP/agentgauge/blob/main/benchmarks/README.md).
 
-**Scanning code you do not control?** The config belongs to the scanned
-repository, so it can exclude its own files, disable rules and accept
-risks, and a repository can grade itself. Pass `--no-config` (the Action's
-`no-config: "true"`) to ignore it and use the built-in defaults; this also
-applies to a pull request from a fork that edits `[tool.agentgauge]` in the
-same change it is judged by. When an `exclude` hides a file that contains a
-sensitive call, the report warns and names the file.
+## Use it in CI
 
-### GitHub Actions
+**GitHub Actions**
 
 ```yaml
 - uses: PreethamNoelP/agentgauge@v0.2.0
@@ -178,7 +167,7 @@ sensitive call, the report warns and names the file.
     fail-on-incomplete: "true"
 ```
 
-With code scanning — the step still exits with the governance result:
+With GitHub code scanning (findings appear on the pull request):
 
 ```yaml
 - uses: PreethamNoelP/agentgauge@v0.2.0
@@ -191,11 +180,10 @@ With code scanning — the step still exits with the governance result:
 ```
 
 Inputs: `path`, `min-score`, `scope`, `fail-on-incomplete`, `sarif-file`,
-`config`, `no-config`. The action installs agentgauge from its own checkout, so what runs
-is exactly the ref you pinned. For the strictest supply-chain posture, pin
-the tag's full commit SHA instead of the tag name.
+`config`, `no-config`. For the strictest supply-chain posture, pin the tag's
+full commit SHA instead of `v0.2.0`.
 
-### pre-commit
+**pre-commit**
 
 ```yaml
 repos:
@@ -206,97 +194,129 @@ repos:
         args: [--fail-on-incomplete]
 ```
 
-The hook scans the whole repository, not the staged files: reachability and
-the score are whole-program properties.
+## Command line
 
-## What leaves your machine: nothing
+```console
+$ agentgauge .                              # scan from the repository root
+$ agentgauge src/server.py                  # a single file
+$ agentgauge . --json                       # machine-readable report
+$ agentgauge . --sarif > agentgauge.sarif   # SARIF 2.1.0 for code scanning
+$ agentgauge . --min-score 80               # stricter threshold (0 disables)
+$ agentgauge . --fail-on-incomplete         # treat reduced coverage as failure
+$ agentgauge . --no-config                  # ignore the repo's own settings
+$ agentgauge . --scope all                  # judge every function with a sink
+$ agentgauge . --baseline base.json --update-baseline   # record today's findings
+$ agentgauge . --baseline base.json         # then fail only on new ones
+```
+
+Run it from the repository root, so reported paths match what code scanning
+expects.
+
+## Configuration
+
+Optional, in `pyproject.toml`:
+
+```toml
+[tool.agentgauge]
+min_score = 70
+exclude = ["tests/*", "scripts/"]
+extra_tool_decorators = ["expose"]         # your framework's tool decorator
+extra_approval_markers = ["greenlight"]    # your approval helper's name
+assume_external_rate_limiting = true       # a gateway limits calls
+
+[[tool.agentgauge.accepted_risks]]
+rule = "human-oversight"
+file = "src/server.py"
+function = "rebuild_index"
+reason = "Runs a fixed make target; no model input reaches it (SEC-142)"
+```
+
+Settings are validated strictly: a typo, an unknown rule, or a setting that
+would quietly switch a check off is an error, not a silent no-op. When you
+scan code you do not control, use `--no-config` — otherwise a repository's
+own settings could exclude its files or accept its own risks. Full
+reference:
+[RULES.md#configuration](https://github.com/PreethamNoelP/agentgauge/blob/main/RULES.md#configuration).
+
+## Is it safe to run?
+
+Yes, including on code you don't trust:
 
 | | |
 |---|---|
-| **Network** | None. The package imports `argparse, ast, collections, dataclasses, fnmatch, functools, hashlib, io, json, os, pathlib, re, sys, tokenize, tomllib, typing` and nothing else. No HTTP client, socket, DNS lookup or update check. |
-| **Files written** | Only the baseline file you name with `--update-baseline`. |
-| **Files read** | `.py` files and known MCP config files under the target, plus one config file. Symlinks and Windows junctions that lead outside the scan root are refused. |
-| **Code execution** | None. Scanned code is never imported, evaluated or run. |
-| **Environment** | Never read. |
-| **Dependencies** | Zero at runtime. |
+| **Network** | None. It imports only the Python standard library: `argparse, ast, collections, dataclasses, fnmatch, functools, hashlib, io, json, os, pathlib, re, sys, tokenize, tomllib, typing`. No HTTP client, telemetry or update check. |
+| **Code execution** | None. Scanned code is parsed, never imported or run. |
+| **Files written** | Only the baseline file you ask for with `--update-baseline`. |
+| **Files read** | Python files and MCP config files under the target. Links leading outside the target are refused. |
+| **Environment** | Never read — no environment variables, no credentials. |
+| **Dependencies** | None at runtime, so no supply chain to audit. |
 
-The report itself contains file paths, function and parameter names,
-resolved call names and flag names from your code — never string literals,
-secret values or source lines. Treat an uploaded SARIF or JSON report with
-the same care as your identifier names. Each claim above is enforced by a
-test in `tests/test_invariants.py`; [SECURITY.md](SECURITY.md) says what
-counts as a vulnerability.
+Every row is enforced by an automated test. Reports contain file paths and
+identifier names from your code — never string literals, secrets or source
+lines. See
+[SECURITY.md](https://github.com/PreethamNoelP/agentgauge/blob/main/SECURITY.md)
+to report a vulnerability.
 
-## Architecture
+## What it cannot do
 
-```mermaid
-flowchart LR
-    CLI[cli.py] --> CFG[config.py]
-    CLI --> SC[scanner.py<br/>two-pass walk]
-    SC -->|pass 1: summaries| CG[callgraph.py<br/>entry points, cross-file<br/>reachability, gating]
-    SC -->|pass 2: per file| CTX[FileContext<br/>one AST walk, scope buckets,<br/>sinks, aliases]
-    CG --> CTX
-    CTX --> AP[approval.py<br/>dominance analysis]
-    CTX --> R[rules/*<br/>six categories]
-    AP --> R
-    SC -->|MCP JSON configs| JCS[configscan.py]
-    R --> AG[scoring.py<br/>verdict, accepted risks,<br/>suppressions]
-    JCS --> AG
-    AG --> OUT[human / JSON / sarif.py]
-    AG --> BL[baseline.py]
-```
+agentgauge reads code; it does not run it or trace every value. So:
 
-- **Rules report facts; scoring turns them into numbers.** Each rule module
-  exposes `RULE_ID`, `CATEGORY`, `WEIGHT` and `check(ctx) -> (sites,
-  passed, findings)`. See [CONTRIBUTING.md](CONTRIBUTING.md).
-- **One walk per file.** `FileContext` builds the node list, parent map,
-  per-scope node buckets and definition index in a single traversal that
-  every rule shares.
-- **Two passes, bounded memory.** Pass one keeps only small per-file
-  summaries (no AST nodes) for the cross-file index; parsed files are reused
-  in pass two up to 8 MB of source, after which they are re-parsed.
+- It can be **wrong in both directions** — the benchmark above shows how
+  often. Treat findings as a reviewer's notes, not a verdict from a judge.
+- It does not notice an approval check that is **written backwards**
+  (acting when approval is refused), or a dangerous call reached through a
+  **lookup table** or a computed name.
+- It cannot tell that a **custom decorator** such as `@guarded` asks a
+  human — teach it with `extra_approval_markers`, or record an accepted
+  risk.
+- Logging and rate limiting are checked for **presence**, not correctness.
+- **Python only.** TypeScript and JavaScript MCP servers are not supported
+  yet.
+- A 100/100 is **not a certification**. It means the patterns agentgauge
+  knows are in place.
 
-## Validation
+## How it works
 
-- **1,169 tests** — per rule, approval dominance, call graph and cross-file
-  reachability, invariants over an awkward-syntax corpus, CLI, config,
-  SARIF, end-to-end — plus `mypy --strict` and `ruff`, on Linux and Windows,
-  Python 3.11–3.13.
-- **Fixtures pinned at both ends:** the vulnerable fixture scores exactly
-  0.0 across 123 sites with every bypass shape named in a test; the clean
-  fixture scores exactly 100.0 across 48 sites.
-- **Benchmark gate:** the labelled corpus must match exactly.
-- **Package gate:** CI builds the wheel, installs it into an empty
-  virtualenv and runs the fixture gates against the installed command.
+1. **Find the tools.** Decorators (`@mcp.tool()`, `@tool`,
+   `@function_tool`, ...), registrations (`Agent(tools=[...])`,
+   `FunctionTool.from_defaults(fn=...)`), and class-based tools.
+2. **Follow the calls** from those tools across files — imports, methods,
+   helpers, callbacks — to everything an agent can reach.
+3. **Check each destructive action** for approval that runs first, error
+   handling, and validated inputs; check each tool for logging and rate
+   limiting; check settings for permissive defaults.
+4. **Report** findings with the exact line and a fix, a score, and a
+   verdict — as text, JSON or SARIF.
 
-## Limits
+Two passes over the repository, one syntax-tree walk per file per pass, no
+code execution. Design details are in
+[CONTRIBUTING.md](https://github.com/PreethamNoelP/agentgauge/blob/main/CONTRIBUTING.md).
 
-agentgauge is a heuristic static analyzer. It does not trace data flow
-beyond one or two assignments, check the polarity of an approval test, see
-sinks behind dict dispatch or non-constant `getattr`, read TypeScript or
-JavaScript servers, or know that a decorator named `@guarded` asks a human.
-Rules 2 and 3 check that logging and rate-limiting code is present, not that
-it is correct. A 100/100 is not a certification; [RULES.md](RULES.md) lists
-every blind spot, and the benchmark keeps the known ones in the numbers.
+## Project status
 
-## Roadmap
+Version 0.2 — usable today, and the rules are still being refined. Tested
+on Linux and Windows, Python 3.11–3.13: 1,185 automated tests, strict type
+checking, linting, the accuracy benchmark, and a build-and-install check of
+the published package, on every change.
 
-- [x] Release tags (`v0.2.0`)
-- [ ] Publish to PyPI
-- [ ] A labelled corpus of real open-source MCP servers for the benchmark
-- [ ] Approval polarity and deeper value tracking
-- [ ] TypeScript/JavaScript MCP servers
-- [ ] Plugin entry points for third-party rules
-- [ ] New categories: secrets exposure, SSRF, excessive tool scope
+**Roadmap:** a benchmark built from real open-source MCP servers ·
+backwards-approval detection and deeper value tracking ·
+TypeScript/JavaScript support · plugins for custom rules · new checks for
+leaked secrets, server-side request forgery and over-broad tool
+permissions.
 
 ## Contributing
 
-Reports of false positives and false negatives are the most useful
-contribution — the issue template asks for a minimal snippet, which becomes
-a benchmark case. See [CONTRIBUTING.md](CONTRIBUTING.md).
+The most useful contribution is a report of a wrong result — a real problem
+it missed, or a false alarm — with a small code sample. Each one becomes a
+test case. See
+[CONTRIBUTING.md](https://github.com/PreethamNoelP/agentgauge/blob/main/CONTRIBUTING.md)
+and the
+[changelog](https://github.com/PreethamNoelP/agentgauge/blob/main/CHANGELOG.md).
 
 ## License
 
-[MIT](LICENSE). Author: **Preetham Noel P** —
+[Apache License 2.0](https://github.com/PreethamNoelP/agentgauge/blob/main/LICENSE).
+Created by **Preetham Noel P** —
 [GitHub](https://github.com/PreethamNoelP) ·
 [LinkedIn](https://www.linkedin.com/in/preethamnoelp)
