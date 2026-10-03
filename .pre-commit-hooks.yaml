@@ -2,7 +2,7 @@
 #
 #   repos:
 #     - repo: https://github.com/PreethamNoelP/agentgauge
-#       rev: <commit-sha or release tag>
+#       rev: v0.2.0
 #       hooks:
 #         - id: agentgauge
 #           args: [--fail-on-incomplete]

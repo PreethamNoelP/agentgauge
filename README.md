@@ -172,7 +172,7 @@ sensitive call, the report warns and names the file.
 ### GitHub Actions
 
 ```yaml
-- uses: PreethamNoelP/agentgauge@<commit-sha>
+- uses: PreethamNoelP/agentgauge@v0.2.0
   with:
     path: .
     fail-on-incomplete: "true"
@@ -181,7 +181,7 @@ sensitive call, the report warns and names the file.
 With code scanning — the step still exits with the governance result:
 
 ```yaml
-- uses: PreethamNoelP/agentgauge@<commit-sha>
+- uses: PreethamNoelP/agentgauge@v0.2.0
   with:
     sarif-file: agentgauge.sarif
   continue-on-error: true
@@ -192,15 +192,15 @@ With code scanning — the step still exits with the governance result:
 
 Inputs: `path`, `min-score`, `scope`, `fail-on-incomplete`, `sarif-file`,
 `config`, `no-config`. The action installs agentgauge from its own checkout, so what runs
-is exactly the ref you pinned. Pin a full commit SHA until release tags are
-published.
+is exactly the ref you pinned. For the strictest supply-chain posture, pin
+the tag's full commit SHA instead of the tag name.
 
 ### pre-commit
 
 ```yaml
 repos:
   - repo: https://github.com/PreethamNoelP/agentgauge
-    rev: <commit-sha>
+    rev: v0.2.0
     hooks:
       - id: agentgauge
         args: [--fail-on-incomplete]
@@ -281,7 +281,8 @@ every blind spot, and the benchmark keeps the known ones in the numbers.
 
 ## Roadmap
 
-- [ ] Publish release tags and a PyPI package
+- [x] Release tags (`v0.2.0`)
+- [ ] Publish to PyPI
 - [ ] A labelled corpus of real open-source MCP servers for the benchmark
 - [ ] Approval polarity and deeper value tracking
 - [ ] TypeScript/JavaScript MCP servers

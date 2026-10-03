@@ -8,7 +8,7 @@ scanner, "breaking" includes anything that can change a repository's score
 or verdict, since that is what CI gates on — those are called out
 explicitly.
 
-## [0.2.0] — unreleased
+## [0.2.0] — 2026-10-03
 
 Everything in this section changes scores and verdicts. Most repositories
 will see different results; the reasons are listed in order of impact.
