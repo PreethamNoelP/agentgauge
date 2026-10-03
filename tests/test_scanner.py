@@ -444,6 +444,7 @@ def _make_junction(link: Path, target: Path) -> bool:
     done = subprocess.run(
         ["cmd", "/c", "mklink", "/J", str(link), str(target)],
         capture_output=True,
+        check=False,
     )
     return done.returncode == 0
 

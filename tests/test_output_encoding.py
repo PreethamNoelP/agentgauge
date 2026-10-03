@@ -21,6 +21,7 @@ def test_unencodable_file_name_does_not_crash_the_human_report(tmp_path: Path) -
     done = subprocess.run(
         [sys.executable, "-m", "agentgauge", str(tmp_path)],
         capture_output=True,
+        check=False,
         env=env,
     )
 
