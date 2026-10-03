@@ -51,7 +51,9 @@ def test_cached_views_match_the_primitives(src):
         ast.dump(f) for f in iter_functions(tree)
     ]
     assert ctx.candidate_sensitive_calls == list(
-        iter_sensitive_calls(ctx.tree, ctx.import_aliases, ctx.string_constants)
+        iter_sensitive_calls(
+            ctx.tree, ctx.import_aliases, ctx.string_constants, ctx.sink_tables
+        )
     )
     assert ctx.parents == build_parent_map(ctx.tree)
     assert ctx.import_aliases == build_import_aliases(tree)

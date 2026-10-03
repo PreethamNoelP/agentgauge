@@ -1,6 +1,8 @@
-"""Documented limits. Every tool here validates its input and handles its
-errors; what is left is a case where agentgauge's answer is wrong, labelled
-with what a reviewer would say. These are the numbers to beat."""
+"""Hard cases. Every tool here validates its obvious input and handles its
+errors; each remaining issue is labelled with what a reviewer would say,
+including the ones agentgauge still gets wrong. Choosing which function to
+run (`action`, `which`) is itself an unvalidated input: the model can pick
+os.system."""
 # expect-verdict: FAIL_CRITICAL
 
 import logging
@@ -31,23 +33,23 @@ def wrong_polarity(path: str) -> str:
 
 
 @mcp.tool()
-def table_dispatch(action: str, path: str) -> str:
+def table_dispatch(action: str, path: str) -> str:  # expect: input-validation
     if not path.startswith(ROOT):
         raise ValueError("outside root")
     try:
-        # A sink looked up in a dict has no static name.
-        ACTIONS[action](path)  # known-miss: human-oversight
+        # A sink looked up in a dispatch table: caught through the table.
+        ACTIONS[action](path)  # expect: human-oversight
     except OSError:
         raise
     return "done"
 
 
 @mcp.tool()
-def dynamic_attribute(cmd: str, which: str) -> str:
+def dynamic_attribute(cmd: str, which: str) -> str:  # expect: input-validation
     if cmd not in {"uptime", "df"}:
         raise ValueError("not allowed")
     try:
-        getattr(os, which)(cmd)  # known-miss: human-oversight
+        getattr(os, which)(cmd)  # expect: human-oversight
     except OSError:
         raise
     return "done"

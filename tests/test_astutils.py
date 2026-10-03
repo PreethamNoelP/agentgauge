@@ -484,8 +484,10 @@ def test_dunder_import_resolves_to_the_named_module():
     ) == ["file delete"]
 
 
-def test_dynamic_getattr_stays_unresolved():
-    assert labels("import os\ngetattr(os, name)(cmd)\n") == []
+def test_dynamic_getattr_on_an_unknown_object_stays_unresolved():
+    # A computed attribute on a dangerous module is a sink (see below); on
+    # an arbitrary object there is nothing to resolve it to.
+    assert labels("getattr(handler, name)(cmd)\n") == []
 
 
 def test_dynamic_sql_on_a_cursor_is_a_sink():
@@ -551,3 +553,26 @@ def test_payment_sdk_reads_and_unrelated_creates_are_not_sinks(src):
 def test_kubernetes_deletes_are_remote_delete_sinks():
     assert labels("v1.delete_namespaced_pod(name, ns)\n") == ["remote delete"]
     assert labels("v1.delete_collection_namespaced_secret(ns)\n") == ["remote delete"]
+
+
+# --- sinks without a static name -------------------------------------------
+
+@pytest.mark.parametrize("src, label", [
+    ("ACTIONS = {'rm': shutil.rmtree}\ndef f(a, p):\n    ACTIONS[a](p)\n", "file delete"),
+    ("ACTIONS = {'rm': shutil.rmtree, 'sh': os.system}\ndef f(a, p):\n    ACTIONS.get(a)(p)\n", "shell exec"),
+    ("from subprocess import run\nRUNNERS = [run]\ndef f(i, c):\n    RUNNERS[i](c)\n", "shell exec"),
+    ("import os\ndef f(name, cmd):\n    getattr(os, name)(cmd)\n", "shell exec"),
+    ("import pickle as p\ndef f(name, b):\n    getattr(p, name)(b)\n", "code exec"),
+])
+def test_dispatch_tables_and_computed_attributes_are_sinks(src, label):
+    assert labels(src) == [label]
+
+
+@pytest.mark.parametrize("src", [
+    "HANDLERS = {'a': print}\ndef f(a):\n    HANDLERS[a]('x')\n",
+    "def f(obj, name):\n    getattr(obj, name)()\n",
+    "import math\ndef f(name, x):\n    getattr(math, name)(x)\n",
+])
+def test_harmless_tables_and_attributes_are_not_sinks(src):
+    assert labels(src) == []
+

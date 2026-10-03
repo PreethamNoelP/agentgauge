@@ -355,17 +355,100 @@ def _contextual_label(call: ast.Call, constants: dict[str, str]) -> str | None:
     return None
 
 
+# A computed attribute on one of these modules can be its most dangerous
+# member: getattr(os, name)(cmd) may well be os.system.
+DYNAMIC_MODULE_LABELS: dict[str, str] = {
+    "os": "shell exec",
+    "subprocess": "shell exec",
+    "pty": "shell exec",
+    "asyncio": "shell exec",
+    "shutil": "file delete",
+    "builtins": "code exec",
+    "pickle": "code exec",
+    "marshal": "code exec",
+    "dill": "code exec",
+}
+_LABEL_RANK = ("code exec", "shell exec", "sql exec", "payment", "remote delete", "file delete")
+
+
+def _name_label(name: str) -> str | None:
+    return SENSITIVE_EXACT.get(name) or SENSITIVE_SUFFIX.get(name.rsplit(".", 1)[-1])
+
+
+def build_sink_tables(
+    nodes: Iterable[ast.AST], aliases: dict[str, str] | None = None
+) -> dict[str, str]:
+    """Names bound to a dict, list, tuple or set literal containing a
+    sensitive function -- a dispatch table such as
+    `ACTIONS = {"remove": shutil.rmtree, "run": os.system}` -- mapped to the
+    most severe label among its members."""
+    tables: dict[str, str] = {}
+    for node in nodes:
+        if not (
+            isinstance(node, ast.Assign)
+            and len(node.targets) == 1
+            and isinstance(node.targets[0], ast.Name)
+        ):
+            continue
+        value = node.value
+        if isinstance(value, ast.Dict):
+            members = [v for v in value.values if v is not None]
+        elif isinstance(value, (ast.List, ast.Tuple, ast.Set)):
+            members = list(value.elts)
+        else:
+            continue
+        labels = {
+            label
+            for member in members
+            if isinstance(member, (ast.Name, ast.Attribute))
+            and (resolved := dotted_name(member, aliases)) is not None
+            and (label := _name_label(resolved)) is not None
+        }
+        if labels:
+            tables[node.targets[0].id] = min(labels, key=_LABEL_RANK.index)
+    return tables
+
+
+def _dynamic_label(
+    call: ast.Call, aliases: dict[str, str] | None, tables: dict[str, str]
+) -> str | None:
+    """Sinks reached without a static name: through a dispatch table
+    (`ACTIONS[name](p)`, `ACTIONS.get(name)(p)`) or a computed attribute on a
+    dangerous module (`getattr(os, name)(cmd)`)."""
+    func = call.func
+    if isinstance(func, ast.Subscript) and isinstance(func.value, ast.Name):
+        return tables.get(func.value.id)
+    if not isinstance(func, ast.Call):
+        return None
+    inner = func.func
+    if (
+        isinstance(inner, ast.Attribute)
+        and inner.attr == "get"
+        and isinstance(inner.value, ast.Name)
+    ):
+        return tables.get(inner.value.id)
+    if isinstance(inner, ast.Name) and inner.id == "getattr" and len(func.args) >= 2:
+        if isinstance(func.args[1], ast.Constant):
+            return None  # resolved statically by dotted_name
+        module = dotted_name(func.args[0], aliases)
+        return DYNAMIC_MODULE_LABELS.get(module or "")
+    return None
+
+
 def sensitive_label(
     call: ast.Call,
     aliases: dict[str, str] | None = None,
     constants: dict[str, str] | None = None,
+    tables: dict[str, str] | None = None,
 ) -> str | None:
     """Action label ("file delete", "shell exec", ...) if this call looks
     sensitive, else None. Exact table first, then the suffix table, then the
-    contextual checks (dynamic SQL, payment HTTP) that read the arguments.
+    contextual checks (dynamic SQL, payment HTTP) that read the arguments,
+    then dispatch tables and computed attributes.
 
     `constants` maps names bound only to string literals to their value
-    (see build_string_constants)."""
+    (see build_string_constants); `tables` maps dispatch-table names to a
+    label (see build_sink_tables)."""
     name = call_name(call, aliases)
     label: str | None = None
     if name is not None:
@@ -379,6 +462,8 @@ def sensitive_label(
         label = SENSITIVE_SUFFIX.get(call.func.attr)
     if label is None:
         label = _contextual_label(call, constants or {})
+    if label is None:
+        label = _dynamic_label(call, aliases, tables or {})
     return label
 
 
@@ -415,11 +500,12 @@ def iter_sensitive_calls(
     tree: ast.AST,
     aliases: dict[str, str] | None = None,
     constants: dict[str, str] | None = None,
+    tables: dict[str, str] | None = None,
 ) -> Iterator[tuple[ast.Call, str]]:
     """Yield (call_node, action_label) for every sensitive call in the tree."""
     for node in ast.walk(tree):
         if isinstance(node, ast.Call):
-            label = sensitive_label(node, aliases, constants)
+            label = sensitive_label(node, aliases, constants, tables)
             if label is not None:
                 yield node, label
 
@@ -714,11 +800,17 @@ class FileContext:
         before cross-file resolution (see sensitive_calls)."""
         aliases = self.import_aliases
         constants = self.string_constants
+        tables = self.sink_tables
         return [
             (call, label)
             for call in self._defs_and_calls[1]
-            if (label := sensitive_label(call, aliases, constants)) is not None
+            if (label := sensitive_label(call, aliases, constants, tables)) is not None
         ]
+
+    @cached_property
+    def sink_tables(self) -> dict[str, str]:
+        """Dispatch tables holding sensitive functions (see build_sink_tables)."""
+        return build_sink_tables(self.all_nodes, self.import_aliases)
 
     @cached_property
     def sensitive_calls(self) -> list[tuple[ast.Call, str]]:
